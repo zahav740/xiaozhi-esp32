@@ -84,6 +84,13 @@ void Application::Initialize() {
     callbacks.on_vad_change = [this](bool speaking) {
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
+    // Synchronous lip-sync: called directly from audio output task
+    callbacks.on_audio_output_level = [this](int level) {
+        auto display = Board::GetInstance().GetDisplay();
+        if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
+            lcd->UpdateFaceAudioLevel(level);
+        }
+    };
     audio_service_.SetCallbacks(callbacks);
 
     // Add state change listeners
@@ -276,11 +283,6 @@ void Application::Run() {
             clock_ticks_++;
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
-
-            // Update face audio level for lip-sync
-            if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
-                lcd->UpdateFaceAudioLevel(audio_service_.GetOutputLevel());
-            }
 
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {

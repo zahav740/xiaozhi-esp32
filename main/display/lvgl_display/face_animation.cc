@@ -14,9 +14,9 @@ FaceAnimation::FaceAnimation(lv_obj_t* parent, int width, int height)
     pupil_size_   = eye_w_ * 55 / 100;      // 29px — big pupil
     eye_spacing_  = display_w_ * 18 / 100;  // 43px from center
     eye_y_        = -display_h_ * 8 / 100;  // -19px above center
-    mouth_w_      = display_w_ * 25 / 100;  // 60px wide mouth
-    mouth_min_h_  = display_h_ * 3 / 100;   // 7px resting
-    mouth_max_h_  = display_h_ * 14 / 100;  // 34px max open
+    mouth_w_      = display_w_ * 30 / 100;  // 72px wide mouth
+    mouth_min_h_  = display_h_ * 4 / 100;   // 10px resting
+    mouth_max_h_  = display_h_ * 20 / 100;  // 48px max open
     mouth_y_      = display_h_ * 18 / 100;  // 43px below center
     blink_h_      = display_h_ * 2 / 100;   // 5px squint line
 
@@ -73,35 +73,39 @@ FaceAnimation::FaceAnimation(lv_obj_t* parent, int width, int height)
     lv_obj_set_scrollbar_mode(right_pupil_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_center(right_pupil_);
 
-    // --- Mouth: smile arc (resting state) ---
-    mouth_smile_ = lv_arc_create(container_);
-    int arc_size = mouth_w_ + mouth_w_ / 3;  // slightly larger than mouth width
-    lv_obj_set_size(mouth_smile_, arc_size, arc_size);
-    lv_arc_set_rotation(mouth_smile_, 0);
-    lv_arc_set_bg_angles(mouth_smile_, 20, 160);     // bottom arc = smile
-    lv_arc_set_angles(mouth_smile_, 20, 160);
-    lv_obj_set_style_arc_width(mouth_smile_, mouth_min_h_, LV_PART_MAIN);
-    lv_obj_set_style_arc_color(mouth_smile_, lv_color_hex(0x2C2C2C), LV_PART_MAIN);
-    lv_obj_set_style_arc_width(mouth_smile_, mouth_min_h_, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(mouth_smile_, lv_color_hex(0x2C2C2C), LV_PART_INDICATOR);
+    // --- Mouth: smile (resting) via clipped circle ---
+    // A small clip container shows only the bottom arc of a large circle = smile curve
+    int smile_h = mouth_w_ / 4;  // ~18px visible curve height
+    mouth_smile_ = lv_obj_create(container_);
+    lv_obj_set_size(mouth_smile_, mouth_w_ + 4, smile_h);
     lv_obj_set_style_bg_opa(mouth_smile_, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(mouth_smile_, 0, 0);
     lv_obj_set_style_pad_all(mouth_smile_, 0, 0);
-    lv_obj_remove_style(mouth_smile_, NULL, LV_PART_KNOB);  // hide knob
-    lv_obj_remove_flag(mouth_smile_, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_scrollbar_mode(mouth_smile_, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_align(mouth_smile_, LV_ALIGN_CENTER, 0, mouth_y_ - arc_size / 4);
+    lv_obj_align(mouth_smile_, LV_ALIGN_CENTER, 0, mouth_y_);
 
-    // --- Mouth: open oval (speaking state, hidden initially) ---
+    // Large circle inside clip — only bottom arc is visible
+    lv_obj_t* smile_arc = lv_obj_create(mouth_smile_);
+    lv_obj_set_size(smile_arc, mouth_w_, mouth_w_);
+    lv_obj_set_style_radius(smile_arc, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_opa(smile_arc, LV_OPA_TRANSP, 0);      // transparent fill
+    lv_obj_set_style_border_color(smile_arc, lv_color_hex(0x2C2C2C), 0);
+    lv_obj_set_style_border_width(smile_arc, 3, 0);              // outline only
+    lv_obj_set_scrollbar_mode(smile_arc, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_pad_all(smile_arc, 0, 0);
+    lv_obj_align(smile_arc, LV_ALIGN_BOTTOM_MID, 0, 0);
+
+    // --- Mouth: open oval (speaking, hidden initially) ---
     mouth_open_ = lv_obj_create(container_);
     lv_obj_set_size(mouth_open_, mouth_w_, mouth_min_h_);
-    lv_obj_set_style_radius(mouth_open_, mouth_min_h_ / 2, 0);
+    lv_obj_set_style_radius(mouth_open_, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(mouth_open_, lv_color_hex(0x2C2C2C), 0);
     lv_obj_set_style_bg_opa(mouth_open_, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(mouth_open_, 0, 0);
     lv_obj_set_scrollbar_mode(mouth_open_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_style_pad_all(mouth_open_, 0, 0);
     lv_obj_align(mouth_open_, LV_ALIGN_CENTER, 0, mouth_y_);
-    lv_obj_add_flag(mouth_open_, LV_OBJ_FLAG_HIDDEN);  // hidden until speaking
+    lv_obj_add_flag(mouth_open_, LV_OBJ_FLAG_HIDDEN);
 
     // Start animation timer (50ms = 20 FPS)
     esp_timer_create_args_t timer_args = {
@@ -176,19 +180,22 @@ void FaceAnimation::OnTick() {
 
     // --- Mouth animation ---
     if (speaking_) {
-        // Speaking: show open oval, hide smile arc
+        // Speaking: show open oval, hide smile
         lv_obj_add_flag(mouth_smile_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(mouth_open_, LV_OBJ_FLAG_HIDDEN);
         int level = audio_level_.load();
-        int mouth_h = mouth_min_h_ + level * (mouth_max_h_ - mouth_min_h_) / 100;
-        int mouth_extra_w = level * (mouth_w_ / 4) / 100;
-        lv_obj_set_size(mouth_open_, mouth_w_ + mouth_extra_w, mouth_h);
-        lv_obj_set_style_radius(mouth_open_, mouth_h / 2, 0);
+        smooth_level_ = (smooth_level_ * 3 + level) / 4;
+        int mouth_h = mouth_min_h_ + smooth_level_ * (mouth_max_h_ - mouth_min_h_) / 100;
+        if (mouth_h < mouth_min_h_ + 2) mouth_h = mouth_min_h_ + 2;
+        int mouth_cur_w = mouth_w_ - smooth_level_ * (mouth_w_ / 5) / 100;
+        lv_obj_set_size(mouth_open_, mouth_cur_w, mouth_h);
+        lv_obj_set_style_radius(mouth_open_, LV_RADIUS_CIRCLE, 0);
         lv_obj_align(mouth_open_, LV_ALIGN_CENTER, 0, mouth_y_);
     } else {
-        // Resting: show smile arc, hide open oval
+        // Resting: show smile curve, hide open oval
         lv_obj_remove_flag(mouth_smile_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(mouth_open_, LV_OBJ_FLAG_HIDDEN);
+        smooth_level_ = 0;
     }
 
     // --- Eye blink animation ---

@@ -25,13 +25,14 @@ private:
     lv_obj_t* left_pupil_ = nullptr;
     lv_obj_t* right_pupil_ = nullptr;
 
-    // Mouth: smile arc (resting) + oval (speaking)
-    lv_obj_t* mouth_smile_ = nullptr;   // arc for smile
+    // Mouth: smile (clipped arc) + open oval (speaking)
+    lv_obj_t* mouth_smile_ = nullptr;   // clip container for smile
     lv_obj_t* mouth_open_ = nullptr;    // oval for speaking
 
     esp_timer_handle_t timer_ = nullptr;
 
     std::atomic<int> audio_level_{0};
+    int smooth_level_ = 0;          // smoothed audio level for mouth animation
     bool speaking_ = false;
     bool listening_ = false;
     bool visible_ = false;

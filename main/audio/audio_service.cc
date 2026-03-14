@@ -308,12 +308,16 @@ void AudioService::AudioOutputTask() {
             codec_->EnableOutput(true);
         }
 
-        // Compute RMS for lip-sync
+        // Compute RMS for lip-sync (scaled for speech range ~1000-8000)
         if (!task->pcm.empty()) {
             int64_t sum = 0;
             for (auto s : task->pcm) sum += (int64_t)s * s;
             int rms = (int)std::sqrt((double)sum / task->pcm.size());
-            audio_output_level_.store(std::min(rms * 100 / 32768, 100));
+            int level = std::min(rms * 100 / 6000, 100);  // speech-optimized scale
+            audio_output_level_.store(level);
+            if (callbacks_.on_audio_output_level) {
+                callbacks_.on_audio_output_level(level);
+            }
         }
 
         codec_->OutputData(task->pcm);

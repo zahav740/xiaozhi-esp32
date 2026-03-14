@@ -81,6 +81,7 @@ struct AudioServiceCallbacks {
     std::function<void(const std::string&)> on_wake_word_detected;
     std::function<void(bool)> on_vad_change;
     std::function<void(void)> on_audio_testing_queue_full;
+    std::function<void(int)> on_audio_output_level;  // 0-100, called from audio output task
 };
 
 
