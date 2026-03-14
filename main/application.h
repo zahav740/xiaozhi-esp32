@@ -104,6 +104,8 @@ public:
     void StopListening();
 
     void Reboot();
+    void OnSwipeRight();
+    void OnSwipeLeft();
     void WakeWordInvoke(const std::string& wake_word);
     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
     bool CanEnterSleepMode();

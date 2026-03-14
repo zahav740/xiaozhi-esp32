@@ -1,6 +1,7 @@
 #include "audio_service.h"
 #include <esp_log.h>
 #include <cstring>
+#include <cmath>
 
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)        \
     (esp_ae_rate_cvt_cfg_t)                                  \
@@ -292,6 +293,7 @@ void AudioService::AudioOutputTask() {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
         audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
         if (service_stopped_) {
+            audio_output_level_.store(0);
             break;
         }
 
@@ -304,6 +306,14 @@ void AudioService::AudioOutputTask() {
             esp_timer_stop(audio_power_timer_);
             esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
             codec_->EnableOutput(true);
+        }
+
+        // Compute RMS for lip-sync
+        if (!task->pcm.empty()) {
+            int64_t sum = 0;
+            for (auto s : task->pcm) sum += (int64_t)s * s;
+            int rms = (int)std::sqrt((double)sum / task->pcm.size());
+            audio_output_level_.store(std::min(rms * 100 / 32768, 100));
         }
 
         codec_->OutputData(task->pcm);

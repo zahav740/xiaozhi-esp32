@@ -89,7 +89,7 @@ private:
         rtc_gpio_set_direction(GPIO_NUM_3, RTC_GPIO_MODE_OUTPUT_ONLY);
         rtc_gpio_set_level(GPIO_NUM_3, 1);
 
-        power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
+        power_save_timer_ = new PowerSaveTimer(-1, -1, -1);  // Disabled for development
         power_save_timer_->OnEnterSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(true);
             GetBacklight()->SetBrightness(1);
@@ -148,26 +148,47 @@ private:
         auto touchpad = board.GetTouchpad();
         static bool was_touched = false;
         static int64_t touch_start_time = 0;
-        const int64_t TOUCH_THRESHOLD_MS = 500;  // 触摸时长阈值，超过500ms视为长按
+        static int16_t touch_start_x = 0;
+        static int16_t touch_start_y = 0;
+        const int64_t TOUCH_THRESHOLD_MS = 500;
+        const int16_t SWIPE_THRESHOLD = 50;  // pixels
 
         touchpad->UpdateTouchPoint();
         auto touch_point = touchpad->GetTouchPoint();
-        // 检测触摸开始
+        // Touch start
         if (touch_point.num > 0 && !was_touched) {
             was_touched = true;
-            touch_start_time = esp_timer_get_time() / 1000; // 转换为毫秒
+            touch_start_time = esp_timer_get_time() / 1000;
+            touch_start_x = touch_point.x;
+            touch_start_y = touch_point.y;
         }
-        // 检测触摸释放
+        // Touch release
         else if (touch_point.num == 0 && was_touched) {
             was_touched = false;
             int64_t touch_duration = (esp_timer_get_time() / 1000) - touch_start_time;
+            int16_t dx = touch_point.x - touch_start_x;
 
-            // 只有短触才触发
-            if (touch_duration < TOUCH_THRESHOLD_MS) {
-                auto& app = Application::GetInstance();
-                if (app.GetDeviceState() == kDeviceStateStarting) {
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() == kDeviceStateStarting) {
+                if (touch_duration < TOUCH_THRESHOLD_MS) {
                     board.EnterWifiConfigMode();
-                    return;
+                }
+                return;
+            }
+
+            if (dx > SWIPE_THRESHOLD) {
+                // Swipe right → show profile selector
+                app.OnSwipeRight();
+            } else if (dx < -SWIPE_THRESHOLD) {
+                // Swipe left → hide profile selector
+                app.OnSwipeLeft();
+            } else if (touch_duration < TOUCH_THRESHOLD_MS) {
+                // Short tap — check if profile panel handles it
+                auto* display = board.GetDisplay();
+                if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
+                    if (lcd->HandleProfileTap(touch_start_y)) {
+                        return;  // Consumed by profile panel
+                    }
                 }
                 app.ToggleChatState();
             }
@@ -258,6 +279,30 @@ private:
         });
     }
 
+    // Auto-listen: when device is idle, automatically enter listening mode
+    // so the server-side Vosk can detect wake word "Саня"
+    esp_timer_handle_t auto_listen_timer_ = nullptr;
+
+    static void auto_listen_callback(void* arg) {
+        auto& app = Application::GetInstance();
+        if (app.GetDeviceState() == kDeviceStateIdle) {
+            app.ToggleChatState();
+        }
+    }
+
+    void InitializeAutoListen() {
+        esp_timer_create_args_t timer_args = {
+            .callback = auto_listen_callback,
+            .arg = NULL,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "auto_listen",
+            .skip_unhandled_events = true,
+        };
+        ESP_ERROR_CHECK(esp_timer_create(&timer_args, &auto_listen_timer_));
+        ESP_ERROR_CHECK(esp_timer_start_periodic(auto_listen_timer_, 2 * 1000 * 1000)); // 2s
+        ESP_LOGI(TAG, "Auto-listen timer started (2s interval)");
+    }
+
 public:
 
     Spotpear_esp32_s3_lcd_1_54() :boot_button_(BOOT_BUTTON_GPIO){
@@ -273,6 +318,7 @@ public:
         InitializePowerManager();
         InitializeSt7789Display();
         InitializeButtons();
+        InitializeAutoListen();
         GetBacklight()->RestoreBrightness();
 
     }

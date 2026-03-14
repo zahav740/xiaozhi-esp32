@@ -846,6 +846,12 @@ void LcdDisplay::SetupUI() {
     lv_obj_center(emoji_image_);
     lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
 
+    // Create animated face on screen (not inside emoji_box_ to avoid LV_SIZE_CONTENT issues)
+    face_ = std::make_unique<FaceAnimation>(screen, width_, height_);
+    // Hide emoji by default, face will show instead
+    lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+
     /* Middle layer: preview_image_ - centered display */
     preview_image_ = lv_image_create(screen);
     lv_obj_set_size(preview_image_, width_ / 2, height_ / 2);
@@ -1075,13 +1081,31 @@ void LcdDisplay::SetEmotion(const char* emotion) {
     if (!setup_ui_called_) {
         ESP_LOGW(TAG, "SetEmotion('%s') called before SetupUI() - emotion will not be displayed!", emotion);
     }
+
+    ESP_LOGI(TAG, "SetEmotion('%s')", emotion);
+
+    // When face animation exists, always keep it visible (ignore emotions like "happy" from LLM)
+    if (face_) {
+        if (gif_controller_) {
+            DisplayLockGuard lock(this);
+            gif_controller_->Stop();
+            gif_controller_.reset();
+        }
+        {
+            DisplayLockGuard lock(this);
+            if (emoji_box_) lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+        }
+        face_->Show();
+        return;
+    }
+
     // Stop any running GIF animation
     if (gif_controller_) {
         DisplayLockGuard lock(this);
         gif_controller_->Stop();
         gif_controller_.reset();
     }
-    
+
     if (emoji_image_ == nullptr) {
         if (setup_ui_called_) {
             ESP_LOGW(TAG, "SetEmotion('%s') failed: emoji_image_ is nullptr (SetupUI() was called but emoji image not created)", emotion);
@@ -1288,10 +1312,22 @@ void LcdDisplay::SetTheme(Theme* theme) {
     Display::SetTheme(lvgl_theme);
 }
 
+void LcdDisplay::SetFaceSpeaking(bool speaking) {
+    if (face_) {
+        face_->SetSpeaking(speaking);
+    }
+}
+
+void LcdDisplay::UpdateFaceAudioLevel(int level) {
+    if (face_) {
+        face_->SetAudioLevel(level);
+    }
+}
+
 void LcdDisplay::SetHideSubtitle(bool hide) {
     DisplayLockGuard lock(this);
     hide_subtitle_ = hide;
-    
+
     // Immediately update UI visibility based on the setting
     if (bottom_bar_ != nullptr) {
         if (hide) {
@@ -1304,4 +1340,143 @@ void LcdDisplay::SetHideSubtitle(bool hide) {
             }
         }
     }
+}
+
+// ═══ Profile Selector Panel ═══
+
+static const char* kProfileIds[] = {"alexey", "miron", "agata"};
+static const char* kProfileNames[] = {"Алексей", "Мирон", "Агата"};
+
+void LcdDisplay::CreateProfilePanel() {
+    if (profile_panel_ != nullptr) return;
+
+    auto screen = lv_screen_active();
+    auto* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    auto text_font = lvgl_theme->text_font()->font();
+
+    // Full-screen overlay panel
+    profile_panel_ = lv_obj_create(screen);
+    lv_obj_set_size(profile_panel_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_set_style_bg_color(profile_panel_, lvgl_theme->background_color(), 0);
+    lv_obj_set_style_bg_opa(profile_panel_, LV_OPA_90, 0);
+    lv_obj_set_style_radius(profile_panel_, 0, 0);
+    lv_obj_set_style_border_width(profile_panel_, 0, 0);
+    lv_obj_set_style_pad_all(profile_panel_, 0, 0);
+    lv_obj_set_scrollbar_mode(profile_panel_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_align(profile_panel_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(profile_panel_, LV_OBJ_FLAG_HIDDEN);
+
+    // Title
+    lv_obj_t* title = lv_label_create(profile_panel_);
+    lv_label_set_text(title, "Профили");
+    lv_obj_set_style_text_font(title, text_font, 0);
+    lv_obj_set_style_text_color(title, lvgl_theme->text_color(), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+
+    // Profile rows
+    int row_height = 50;
+    int start_y = 60;
+
+    for (int i = 0; i < kProfileCount; i++) {
+        // Row container
+        profile_rows_[i] = lv_obj_create(profile_panel_);
+        lv_obj_set_size(profile_rows_[i], LV_HOR_RES - 20, row_height);
+        lv_obj_set_style_radius(profile_rows_[i], 8, 0);
+        lv_obj_set_style_border_width(profile_rows_[i], 1, 0);
+        lv_obj_set_style_border_color(profile_rows_[i], lvgl_theme->border_color(), 0);
+        lv_obj_set_style_pad_left(profile_rows_[i], 15, 0);
+        lv_obj_set_style_pad_right(profile_rows_[i], 15, 0);
+        lv_obj_set_scrollbar_mode(profile_rows_[i], LV_SCROLLBAR_MODE_OFF);
+        lv_obj_align(profile_rows_[i], LV_ALIGN_TOP_MID, 0, start_y + i * (row_height + 8));
+
+        // Selection indicator (bullet)
+        profile_indicators_[i] = lv_label_create(profile_rows_[i]);
+        lv_obj_set_style_text_font(profile_indicators_[i], text_font, 0);
+        lv_obj_set_style_text_color(profile_indicators_[i], lvgl_theme->text_color(), 0);
+        lv_obj_align(profile_indicators_[i], LV_ALIGN_LEFT_MID, 0, 0);
+
+        // Profile name label
+        profile_labels_[i] = lv_label_create(profile_rows_[i]);
+        lv_label_set_text(profile_labels_[i], kProfileNames[i]);
+        lv_obj_set_style_text_font(profile_labels_[i], text_font, 0);
+        lv_obj_set_style_text_color(profile_labels_[i], lvgl_theme->text_color(), 0);
+        lv_obj_align(profile_labels_[i], LV_ALIGN_LEFT_MID, 25, 0);
+
+    }
+
+    UpdateProfileHighlight();
+}
+
+void LcdDisplay::UpdateProfileHighlight() {
+    if (profile_panel_ == nullptr) return;
+
+    auto* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+    for (int i = 0; i < kProfileCount; i++) {
+        if (i == current_profile_index_) {
+            lv_label_set_text(profile_indicators_[i], ">");
+            lv_obj_set_style_bg_color(profile_rows_[i], lvgl_theme->assistant_bubble_color(), 0);
+            lv_obj_set_style_bg_opa(profile_rows_[i], LV_OPA_80, 0);
+        } else {
+            lv_label_set_text(profile_indicators_[i], " ");
+            lv_obj_set_style_bg_opa(profile_rows_[i], LV_OPA_TRANSP, 0);
+        }
+    }
+}
+
+void LcdDisplay::ShowProfileSelector() {
+    DisplayLockGuard lock(this);
+    if (profile_panel_ == nullptr) {
+        CreateProfilePanel();
+    }
+    lv_obj_remove_flag(profile_panel_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(profile_panel_);
+    profile_panel_visible_ = true;
+    UpdateProfileHighlight();
+}
+
+void LcdDisplay::HideProfileSelector() {
+    DisplayLockGuard lock(this);
+    if (profile_panel_ != nullptr) {
+        lv_obj_add_flag(profile_panel_, LV_OBJ_FLAG_HIDDEN);
+    }
+    profile_panel_visible_ = false;
+}
+
+void LcdDisplay::SelectProfile(int index) {
+    if (index < 0 || index >= kProfileCount) return;
+    current_profile_index_ = index;
+
+    {
+        DisplayLockGuard lock(this);
+        UpdateProfileHighlight();
+    }
+
+    ESP_LOGI(TAG, "Profile selected: %d (%s)", index, kProfileIds[index]);
+
+    if (on_profile_selected_) {
+        on_profile_selected_(index, kProfileIds[index]);
+    }
+}
+
+bool LcdDisplay::HandleProfileTap(int touch_y) {
+    if (!profile_panel_visible_) return false;
+
+    // Row layout: start_y=60, row_height=50, gap=8
+    const int start_y = 60;
+    const int row_height = 50;
+    const int row_stride = row_height + 8;  // 58
+
+    for (int i = 0; i < kProfileCount; i++) {
+        int row_top = start_y + i * row_stride;
+        int row_bottom = row_top + row_height;
+        if (touch_y >= row_top && touch_y <= row_bottom) {
+            SelectProfile(i);
+            HideProfileSelector();
+            return true;
+        }
+    }
+
+    // Tap outside rows — just close panel
+    HideProfileSelector();
+    return true;
 }

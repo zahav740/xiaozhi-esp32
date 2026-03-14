@@ -78,6 +78,11 @@ void Protocol::SendMcpMessage(const std::string& payload) {
     SendText(message);
 }
 
+void Protocol::SendProfileMessage(const std::string& profile_id) {
+    std::string message = "{\"session_id\":\"" + session_id_ + "\",\"type\":\"profile\",\"id\":\"" + profile_id + "\"}";
+    SendText(message);
+}
+
 bool Protocol::IsTimeout() const {
     const int kTimeoutSeconds = 120;
     auto now = std::chrono::steady_clock::now();

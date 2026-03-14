@@ -1,6 +1,7 @@
 #include "application.h"
 #include "board.h"
 #include "display.h"
+#include "lcd_display.h"
 #include "system_info.h"
 #include "audio_codec.h"
 #include "mqtt_protocol.h"
@@ -155,6 +156,32 @@ void Application::Initialize() {
         }
     });
 
+    // Setup profile selector callback
+    if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
+        // Restore saved profile from NVS
+        Settings profile_settings("profiles", true);
+        int saved_index = profile_settings.GetInt("current", 0);
+        if (saved_index >= 0 && saved_index < LcdDisplay::kProfileCount) {
+            lcd->SelectProfile(saved_index);
+        }
+
+        lcd->SetOnProfileSelected([this](int index, const char* id) {
+            ESP_LOGI(TAG, "Profile selected: %s (index=%d)", id, index);
+
+            // Save to NVS
+            Settings profile_settings("profiles", true);
+            profile_settings.SetInt("current", index);
+
+            // Send profile message to server
+            std::string profile_id(id);
+            Schedule([this, profile_id]() {
+                if (protocol_ && protocol_->IsAudioChannelOpened()) {
+                    protocol_->SendProfileMessage(profile_id);
+                }
+            });
+        });
+    }
+
     // Start network asynchronously
     board.StartNetwork();
 
@@ -249,7 +276,12 @@ void Application::Run() {
             clock_ticks_++;
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
-        
+
+            // Update face audio level for lip-sync
+            if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
+                lcd->UpdateFaceAudioLevel(audio_service_.GetOutputLevel());
+            }
+
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
@@ -507,6 +539,16 @@ void Application::InitializeProtocol() {
             ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
                 protocol_->server_sample_rate(), codec->output_sample_rate());
         }
+
+        // Send current profile to server on connection
+        auto display = board.GetDisplay();
+        if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
+            static const char* profile_ids[] = {"alexey", "miron", "agata"};
+            int idx = lcd->GetSelectedProfile();
+            if (idx >= 0 && idx < LcdDisplay::kProfileCount) {
+                protocol_->SendProfileMessage(profile_ids[idx]);
+            }
+        }
     });
     
     protocol_->OnAudioChannelClosed([this, &board]() {
@@ -531,11 +573,9 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                        }
+                        // Go back to listening so audio keeps flowing to server.
+                        // Server-side Vosk handles wake word "Саня" with confidence check.
+                        SetDeviceState(kDeviceStateListening);
                     }
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
@@ -579,6 +619,12 @@ void Application::InitializeProtocol() {
                 } else {
                     ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
                 }
+            }
+        } else if (strcmp(type->valuestring, "profile") == 0) {
+            auto id = cJSON_GetObjectItem(root, "id");
+            auto name = cJSON_GetObjectItem(root, "name");
+            if (cJSON_IsString(id) && cJSON_IsString(name)) {
+                ESP_LOGI(TAG, "Server confirmed profile: %s (%s)", id->valuestring, name->valuestring);
             }
         } else if (strcmp(type->valuestring, "alert") == 0) {
             auto status = cJSON_GetObjectItem(root, "status");
@@ -867,6 +913,9 @@ void Application::HandleStateChangedEvent() {
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+            if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
+                lcd->SetFaceSpeaking(false);
+            }
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
@@ -878,6 +927,9 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
+            if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
+                lcd->SetFaceSpeaking(false);
+            }
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
@@ -908,6 +960,9 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
+            if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
+                lcd->SetFaceSpeaking(true);
+            }
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
@@ -1104,6 +1159,28 @@ void Application::SetAecMode(AecMode mode) {
 
 void Application::PlaySound(const std::string_view& sound) {
     audio_service_.PlaySound(sound);
+}
+
+void Application::OnSwipeRight() {
+    Schedule([this]() {
+        auto display = Board::GetInstance().GetDisplay();
+        if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
+            if (!lcd->IsProfilePanelVisible()) {
+                lcd->ShowProfileSelector();
+            }
+        }
+    });
+}
+
+void Application::OnSwipeLeft() {
+    Schedule([this]() {
+        auto display = Board::GetInstance().GetDisplay();
+        if (auto* lcd = dynamic_cast<LcdDisplay*>(display)) {
+            if (lcd->IsProfilePanelVisible()) {
+                lcd->HideProfileSelector();
+            }
+        }
+    });
 }
 
 void Application::ResetProtocol() {
