@@ -8,7 +8,11 @@
 
 class RokiFace {
 public:
-    enum Emotion { HAPPY, SAD, SURPRISED, ANGRY, LOVE, EXCITED, SLEEPY, EMO_COUNT };
+    enum Emotion {
+        HAPPY, SAD, SURPRISED, ANGRY, EXCITED, LAUGH,
+        WINK, WORRIED, SILLY, SMIRK, DISGUSTED, SCARED,
+        EMO_COUNT
+    };
 
     RokiFace();
     ~RokiFace();

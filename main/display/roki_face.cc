@@ -10,8 +10,13 @@ extern const uint8_t _binary_sad_bin_start[]       asm("_binary_sad_bin_start");
 extern const uint8_t _binary_angry_bin_start[]     asm("_binary_angry_bin_start");
 extern const uint8_t _binary_surprised_bin_start[] asm("_binary_surprised_bin_start");
 extern const uint8_t _binary_excited_bin_start[]   asm("_binary_excited_bin_start");
+extern const uint8_t _binary_laugh_bin_start[]     asm("_binary_laugh_bin_start");
 extern const uint8_t _binary_wink_bin_start[]      asm("_binary_wink_bin_start");
 extern const uint8_t _binary_worried_bin_start[]   asm("_binary_worried_bin_start");
+extern const uint8_t _binary_silly_bin_start[]     asm("_binary_silly_bin_start");
+extern const uint8_t _binary_smirk_bin_start[]     asm("_binary_smirk_bin_start");
+extern const uint8_t _binary_disgusted_bin_start[] asm("_binary_disgusted_bin_start");
+extern const uint8_t _binary_scared_bin_start[]    asm("_binary_scared_bin_start");
 
 static const size_t FACE_SIZE = 240 * 240 * 2;
 
@@ -21,8 +26,13 @@ const uint8_t* RokiFace::GetFaceData(Emotion e) {
         case ANGRY:     return _binary_angry_bin_start;
         case SURPRISED: return _binary_surprised_bin_start;
         case EXCITED:   return _binary_excited_bin_start;
-        case LOVE:      return _binary_wink_bin_start;
-        case SLEEPY:    return _binary_worried_bin_start;
+        case LAUGH:     return _binary_laugh_bin_start;
+        case WINK:      return _binary_wink_bin_start;
+        case WORRIED:   return _binary_worried_bin_start;
+        case SILLY:     return _binary_silly_bin_start;
+        case SMIRK:     return _binary_smirk_bin_start;
+        case DISGUSTED: return _binary_disgusted_bin_start;
+        case SCARED:    return _binary_scared_bin_start;
         default:        return _binary_happy_bin_start;
     }
 }
@@ -68,10 +78,14 @@ void RokiFace::SetEmotion(const char* s) {
     else if (strcmp(s, "sad") == 0)        e = SAD;
     else if (strcmp(s, "angry") == 0)      e = ANGRY;
     else if (strcmp(s, "surprised") == 0)  e = SURPRISED;
-    else if (strcmp(s, "excited") == 0 || strcmp(s, "laughing") == 0) e = EXCITED;
-    else if (strcmp(s, "love") == 0 || strcmp(s, "shy") == 0) e = LOVE;
-    else if (strcmp(s, "sleepy") == 0 || strcmp(s, "confused") == 0) e = SLEEPY;
-    else if (strcmp(s, "worried") == 0 || strcmp(s, "scared") == 0) e = SLEEPY;
+    else if (strcmp(s, "excited") == 0)    e = EXCITED;
+    else if (strcmp(s, "laughing") == 0)   e = LAUGH;
+    else if (strcmp(s, "winking") == 0)    e = WINK;
+    else if (strcmp(s, "thinking") == 0 || strcmp(s, "confused") == 0) e = WORRIED;
+    else if (strcmp(s, "silly") == 0)      e = SILLY;
+    else if (strcmp(s, "cool") == 0)       e = SMIRK;
+    else if (strcmp(s, "scared") == 0)     e = SCARED;
+    else if (strcmp(s, "disgusted") == 0)  e = DISGUSTED;
     SetEmotion(e);
 }
 
