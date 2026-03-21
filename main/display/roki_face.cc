@@ -116,26 +116,77 @@ void RokiFace::FeedAmplitude(const int16_t* pcm, size_t n) {
     }
 }
 
-// Just swap between original face images — no geometric overlays
+// Draw a filled ellipse on the RGB565 buffer
+void RokiFace::DrawEllipse(uint16_t* buf, int cx, int cy, int rx, int ry, uint16_t color) {
+    int x0 = std::max(0, cx - rx);
+    int x1 = std::min(w_ - 1, cx + rx);
+    int y0 = std::max(0, cy - ry);
+    int y1 = std::min(h_ - 1, cy + ry);
+    for (int y = y0; y <= y1; y++) {
+        int dy = y - cy;
+        // Ellipse equation: (dx/rx)^2 + (dy/ry)^2 <= 1
+        // dx^2 <= rx^2 * (1 - dy^2/ry^2) = rx^2 * (ry^2 - dy^2) / ry^2
+        int span_sq = (int64_t)rx * rx * (ry * ry - dy * dy) / (ry * ry);
+        if (span_sq < 0) continue;
+        int span = (int)sqrtf((float)span_sq);
+        int lx = std::max(x0, cx - span);
+        int hx = std::min(x1, cx + span);
+        for (int x = lx; x <= hx; x++) {
+            buf[y * w_ + x] = color;
+        }
+    }
+}
+
+void RokiFace::DrawMouthOverlay(int open_amount) {
+    uint16_t* buf = (uint16_t*)dbuf_->data;
+    // Mouth center at (120, 185) on 240x240 face
+    int cx = 120, cy = 185;
+    int rx = 16 + open_amount / 3;  // wider when more open
+    int ry = 4 + open_amount;       // height driven by amplitude
+
+    // Dark mouth interior (RGB565: R=3, G=1, B=2 → very dark reddish)
+    uint16_t mouth_color = (3 << 11) | (1 << 5) | 2;
+    DrawEllipse(buf, cx, cy, rx, ry, mouth_color);
+
+    // Lighter tongue hint at bottom (RGB565: R=22, G=8, B=8 → pinkish)
+    if (ry > 8) {
+        uint16_t tongue_color = (22 << 11) | (8 << 5) | 8;
+        DrawEllipse(buf, cx, cy + ry / 2, rx / 2, ry / 4, tongue_color);
+    }
+}
+
 void RokiFace::Render() {
     if (!canvas_ || !dbuf_) return;
 
-    bool should_open = speaking_ && (amp_.load() > 500);
+    int amp = amp_.load();
+    bool should_open = speaking_ && (amp > 500);
+    // Map amplitude (500..10000) to mouth open amount (1..18)
+    int open_amount = should_open ? std::min(18, std::max(1, (amp - 500) / 530)) : 0;
 
     if (should_open && !mouth_open_) {
-        // Open mouth: show excited face
-        memcpy(dbuf_->data, _binary_excited_bin_start, FACE_SIZE);
+        // Start talking: redraw face with mouth overlay
+        memcpy(dbuf_->data, GetFaceData(emo_), FACE_SIZE);
+        DrawMouthOverlay(open_amount);
         mouth_open_ = true;
+        prev_open_amount_ = open_amount;
+        lv_obj_invalidate(canvas_);
+    } else if (should_open && mouth_open_ && open_amount != prev_open_amount_) {
+        // Mouth size changed: redraw
+        memcpy(dbuf_->data, GetFaceData(emo_), FACE_SIZE);
+        DrawMouthOverlay(open_amount);
+        prev_open_amount_ = open_amount;
         lv_obj_invalidate(canvas_);
     } else if (!should_open && mouth_open_) {
-        // Close mouth: show current emotion face
+        // Close mouth: restore original face
         memcpy(dbuf_->data, GetFaceData(emo_), FACE_SIZE);
         mouth_open_ = false;
+        prev_open_amount_ = 0;
         lv_obj_invalidate(canvas_);
     } else if (dirty_.exchange(false)) {
         // Emotion changed
         memcpy(dbuf_->data, GetFaceData(emo_), FACE_SIZE);
         mouth_open_ = false;
+        prev_open_amount_ = 0;
         lv_obj_invalidate(canvas_);
     }
 }

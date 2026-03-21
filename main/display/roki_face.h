@@ -5,6 +5,7 @@
 #include <misc/lv_timer_private.h>
 #include <esp_timer.h>
 #include <atomic>
+#include <cmath>
 
 class RokiFace {
 public:
@@ -31,7 +32,8 @@ private:
     Emotion emo_ = HAPPY;
     std::atomic<bool> speaking_{false};
     std::atomic<int> amp_{0};
-    bool mouth_open_ = false;  // current display state
+    bool mouth_open_ = false;
+    int prev_open_amount_ = 0;
 
     esp_timer_handle_t lip_tmr_ = nullptr;
     lv_timer_t* render_lv_tmr_ = nullptr;
@@ -39,6 +41,8 @@ private:
 
     void Render();
     const uint8_t* GetFaceData(Emotion e);
+    void DrawEllipse(uint16_t* buf, int cx, int cy, int rx, int ry, uint16_t color);
+    void DrawMouthOverlay(int open_amount);
 
     static void OnLvRender(lv_timer_t* t);
     static void OnLipSync(void* a);
