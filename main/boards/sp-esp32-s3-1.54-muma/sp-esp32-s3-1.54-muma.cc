@@ -29,15 +29,28 @@
 
 class Cst816d : public I2cDevice {
 public:
+    // CST816D gesture IDs
+    enum Gesture : uint8_t {
+        GESTURE_NONE        = 0x00,
+        GESTURE_SLIDE_UP    = 0x01,
+        GESTURE_SLIDE_DOWN  = 0x02,
+        GESTURE_SLIDE_LEFT  = 0x03,
+        GESTURE_SLIDE_RIGHT = 0x04,
+        GESTURE_CLICK       = 0x05,
+        GESTURE_DOUBLE_CLICK = 0x0B,
+        GESTURE_LONG_PRESS  = 0x0C,
+    };
+
     struct TouchPoint_t {
         int num = 0;
         int x = -1;
         int y = -1;
+        Gesture gesture = GESTURE_NONE;
     };
     Cst816d(i2c_master_bus_handle_t i2c_bus, uint8_t addr) : I2cDevice(i2c_bus, addr) {
         uint8_t chip_id = ReadReg(0xA3);
         ESP_LOGI(TAG, "Get chip ID: 0x%02X", chip_id);
-        read_buffer_ = new uint8_t[6];
+        read_buffer_ = new uint8_t[7];
     }
 
     ~Cst816d() {
@@ -45,10 +58,11 @@ public:
     }
 
     void UpdateTouchPoint() {
-        ReadRegs(0x02, read_buffer_, 6);
-        tp_.num = read_buffer_[0] & 0x0F;
-        tp_.x = ((read_buffer_[1] & 0x0F) << 8) | read_buffer_[2];
-        tp_.y = ((read_buffer_[3] & 0x0F) << 8) | read_buffer_[4];
+        ReadRegs(0x01, read_buffer_, 7);
+        tp_.gesture = (Gesture)read_buffer_[0];
+        tp_.num = read_buffer_[1] & 0x0F;
+        tp_.x = ((read_buffer_[2] & 0x0F) << 8) | read_buffer_[3];
+        tp_.y = ((read_buffer_[4] & 0x0F) << 8) | read_buffer_[5];
     }
 
     const TouchPoint_t& GetTouchPoint() {
@@ -60,6 +74,11 @@ private:
     TouchPoint_t tp_;
 };
 
+// Profile definitions for swipe switching
+static const char* PROFILE_IDS[] = {"alexey", "miron", "agata"};
+static const char* PROFILE_NAMES[] = {"Alexey", "Miron", "Agata"};
+static const int NUM_PROFILES = 3;
+
 class Spotpear_esp32_s3_lcd_1_54 : public WifiBoard {
 private:
     i2c_master_bus_handle_t codec_i2c_bus_;
@@ -70,6 +89,7 @@ private:
     Cst816d* cst816d_;
     esp_io_expander_handle_t io_expander_ = NULL;
     esp_lcd_panel_handle_t panel_ = nullptr;
+    int current_profile_index_ = 0;
 
     PowerManager* power_manager_;
     PowerSaveTimer* power_save_timer_;
@@ -147,29 +167,44 @@ private:
         auto& board = (Spotpear_esp32_s3_lcd_1_54&)Board::GetInstance();
         auto touchpad = board.GetTouchpad();
         static bool was_touched = false;
+        static bool swipe_detected = false;
         static int64_t touch_start_time = 0;
-        const int64_t TOUCH_THRESHOLD_MS = 500;  // 触摸时长阈值，超过500ms视为长按
+        static Cst816d::Gesture last_gesture = Cst816d::GESTURE_NONE;
+        const int64_t TOUCH_THRESHOLD_MS = 500;
 
         touchpad->UpdateTouchPoint();
         auto touch_point = touchpad->GetTouchPoint();
-        // 检测触摸开始
+
+        // Handle swipe gestures for profile switching
+        if (touch_point.gesture != Cst816d::GESTURE_NONE &&
+            touch_point.gesture != last_gesture) {
+            if (touch_point.gesture == Cst816d::GESTURE_SLIDE_LEFT) {
+                swipe_detected = true;
+                board.CycleProfile(1);
+            } else if (touch_point.gesture == Cst816d::GESTURE_SLIDE_RIGHT) {
+                swipe_detected = true;
+                board.CycleProfile(-1);
+            }
+        }
+        last_gesture = touch_point.gesture;
+
+        // Handle tap (only if not a swipe)
         if (touch_point.num > 0 && !was_touched) {
             was_touched = true;
-            touch_start_time = esp_timer_get_time() / 1000; // 转换为毫秒
-        }
-        // 检测触摸释放
-        else if (touch_point.num == 0 && was_touched) {
+            swipe_detected = false;
+            touch_start_time = esp_timer_get_time() / 1000;
+        } else if (touch_point.num == 0 && was_touched) {
             was_touched = false;
-            int64_t touch_duration = (esp_timer_get_time() / 1000) - touch_start_time;
-
-            // 只有短触才触发
-            if (touch_duration < TOUCH_THRESHOLD_MS) {
-                auto& app = Application::GetInstance();
-                if (app.GetDeviceState() == kDeviceStateStarting) {
-                    board.EnterWifiConfigMode();
-                    return;
+            if (!swipe_detected) {
+                int64_t touch_duration = (esp_timer_get_time() / 1000) - touch_start_time;
+                if (touch_duration < TOUCH_THRESHOLD_MS) {
+                    auto& app = Application::GetInstance();
+                    if (app.GetDeviceState() == kDeviceStateStarting) {
+                        board.EnterWifiConfigMode();
+                        return;
+                    }
+                    app.ToggleChatState();
                 }
-                app.ToggleChatState();
             }
         }
     }
@@ -300,6 +335,19 @@ public:
 
     Cst816d* GetTouchpad() {
         return cst816d_;
+    }
+
+    void CycleProfile(int direction) {
+        current_profile_index_ = (current_profile_index_ + direction + NUM_PROFILES) % NUM_PROFILES;
+        const char* id = PROFILE_IDS[current_profile_index_];
+        const char* name = PROFILE_NAMES[current_profile_index_];
+        ESP_LOGI(TAG, "Profile switched to: %s (%s)", name, id);
+
+        // Send profile switch via MCP channel to server
+        std::string payload = "{\"type\":\"profile\",\"id\":\"";
+        payload += id;
+        payload += "\"}";
+        Application::GetInstance().SendMcpMessage(payload);
     }
 
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {
