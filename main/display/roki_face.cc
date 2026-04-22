@@ -104,6 +104,11 @@ void RokiFace::Create(lv_obj_t* parent, int w, int h) {
     canvas_ = lv_canvas_create(parent);
     lv_canvas_set_draw_buf(canvas_, dbuf_);
     lv_obj_center(canvas_);
+    // Slightly shrink the whole face so nothing gets clipped by the
+    // rounded corners of the 1.54" LCD. 256 = 100%, 218 ≈ 85%.
+    lv_obj_set_style_transform_pivot_x(canvas_, w / 2, 0);
+    lv_obj_set_style_transform_pivot_y(canvas_, h / 2, 0);
+    lv_obj_set_style_transform_scale(canvas_, 218, 0);
 
     // Build a "mouthless" RAM copy of the happy sprite. This lets us draw
     // a fully synthetic mouth (static idle smile or viseme) every frame
