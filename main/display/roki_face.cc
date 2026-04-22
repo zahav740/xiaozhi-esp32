@@ -207,12 +207,11 @@ void RokiFace::DrawMouthOverlay(int open_amount) {
     uint16_t* buf = (uint16_t*)dbuf_->data;
 
     if (emo_ == HAPPY) {
-        // B&W cartoon: ink-only mouth animation. We never paint a white
-        // rectangle — we only touch pixels that are "dark smile ink" in the
-        // base sprite and well inside the face circle (so the circle outline
-        // is preserved). At rest the sprite is shown untouched; while
-        // speaking we vertically scale the painted smile rows around PIVOT_Y
-        // with a factor 1.0..1.28 driven by audio amplitude.
+        // Ink-only, two-lip articulated mouth. Upper and lower lips are drawn
+        // as parabolic curves that meet at shared corners; the gap between
+        // their centres grows with audio amplitude, so the mouth opens and
+        // closes like a real talking face (jaw + lip mimicry). At rest the
+        // painted smile is shown untouched.
         float a = (float)open_amount / (float)MOUTH_MAX_OPEN;
         if (a < 0.0f) a = 0.0f;
         if (a > 1.0f) a = 1.0f;
@@ -221,14 +220,11 @@ void RokiFace::DrawMouthOverlay(int open_amount) {
 
         const uint16_t* base = (const uint16_t*)GetFaceData(HAPPY);
         const uint16_t white = base[10 * w_ + 10];
+        const uint16_t black = 0x0000;
 
-        // Top lip anchored — smile only stretches downward (jaw drop).
-        const int SMILE_Y0 = 146;
-        const int SMILE_Y1 = 207;
-        const int LOWER_DOT_Y0 = 215;
-        const float scale  = 1.0f + 0.30f * a;
+        const int SMILE_Y0 = 140;
+        const int SMILE_Y1 = 216;
 
-        // Face body bounds (interior of the painted outline ring).
         const int FACE_CX = 120;
         const int FACE_CY = 120;
         const int FACE_INNER_R2 = 102 * 102;
@@ -237,17 +233,20 @@ void RokiFace::DrawMouthOverlay(int open_amount) {
             int r = (p >> 11) & 0x1F;
             int g = (p >> 5)  & 0x3F;
             int b =  p        & 0x1F;
-            return r < 10 && g < 20 && b < 10;
+            // Broader threshold so anti-aliased gray edges of the painted
+            // smile are also erased (prevents the original arc from bleeding
+            // through when the animated lips are drawn on top).
+            return r < 24 && g < 48 && b < 24;
         };
         auto inside_face = [&](int y, int x) -> bool {
             int dy = y - FACE_CY, dx = x - FACE_CX;
             return dy * dy + dx * dx < FACE_INNER_R2;
         };
 
-        // 1) Erase the ORIGINAL painted smile ink (interior only — outline
-        //    and background stay untouched → no visible rectangle).
+        // 1) Erase painted smile ink inside the face circle — arc-shaped,
+        //    outline & background stay untouched.
         for (int y = SMILE_Y0; y <= SMILE_Y1; y++) {
-            if (y < 0 || y >= h_ || y >= LOWER_DOT_Y0) continue;
+            if (y < 0 || y >= h_) continue;
             const uint16_t* src_row = base + y * w_;
             uint16_t* dst_row = buf + y * w_;
             for (int x = 0; x < w_; x++) {
@@ -257,34 +256,38 @@ void RokiFace::DrawMouthOverlay(int open_amount) {
             }
         }
 
-        // 2) Redraw smile ink stretched downward from SMILE_Y0 (top lip
-        //    anchored — eye area never touched).
-        int dst_y1 = SMILE_Y0 + (int)((SMILE_Y1 - SMILE_Y0) * scale);
-        if (dst_y1 >= LOWER_DOT_Y0) dst_y1 = LOWER_DOT_Y0 - 1;
+        // 2) Draw two articulated lips as parabolic arcs that meet at shared
+        //    corners. Both lips lift at the corners (smile personality);
+        //    upper lip dips a touch at centre while lower lip drops strongly
+        //    with amplitude → realistic opening mouth.
+        const int MOUTH_CX    = 114;
+        const int MOUTH_RX    = 82;          // corner half-span
+        const int CORNER_Y    = 164;
+        const float CORNER_UP   = 6.0f;      // smile lift at corners
+        const float UPPER_DIP   = 2.0f * a;  // upper lip centre dip (subtle)
+        const float LOWER_DROP  = 26.0f * a; // lower lip centre drop
+        const int   THICKNESS   = 5;         // lip line thickness in px
 
-        for (int y = SMILE_Y0; y <= dst_y1; y++) {
-            if (y < 0 || y >= h_) continue;
-            int src_y = SMILE_Y0 +
-                        (int)(((float)(y - SMILE_Y0)) / scale + 0.5f);
-            if (src_y < SMILE_Y0 || src_y > SMILE_Y1) continue;
-            const uint16_t* src_row = base + src_y * w_;
-            uint16_t* dst_row = buf + y * w_;
-            for (int x = 0; x < w_; x++) {
-                uint16_t p = src_row[x];
-                if (is_dark_ink(p) && inside_face(src_y, x) && inside_face(y, x)) {
-                    dst_row[x] = p;
+        for (int x = MOUTH_CX - MOUTH_RX; x <= MOUTH_CX + MOUTH_RX; x++) {
+            if (x < 0 || x >= w_) continue;
+            float tt_raw = (float)(x - MOUTH_CX) / (float)MOUTH_RX;
+            float tt     = tt_raw * tt_raw;        // 0 at centre → 1 at corner
+            float omtt   = 1.0f - tt;              // 1 at centre → 0 at corner
+
+            int corner_lift = (int)(CORNER_UP * tt + 0.5f);
+            int upper_y = CORNER_Y - corner_lift + (int)(UPPER_DIP  * omtt + 0.5f);
+            int lower_y = CORNER_Y - corner_lift + (int)(LOWER_DROP * omtt + 0.5f);
+
+            for (int dy = 0; dy < THICKNESS; dy++) {
+                int uy = upper_y + dy;
+                int ly = lower_y + dy;
+                if (uy >= 0 && uy < h_ && inside_face(uy, x)) {
+                    buf[uy * w_ + x] = black;
+                }
+                if (ly != uy && ly >= 0 && ly < h_ && inside_face(ly, x)) {
+                    buf[ly * w_ + x] = black;
                 }
             }
-        }
-
-        // 3) Optional jaw/tongue depth on loud peaks.
-        if (a >= 0.18f) {
-            const uint16_t black = 0x0000;
-            const int mcx = HAPPY_MOUTH_CX;
-            const int mcy = (int)(178 + a * 6);
-            int irx = (int)(10 + 28 * a);
-            int iry = (int)(3  + 11 * a);
-            DrawEllipse(buf, mcx, mcy, irx, iry, black);
         }
         return;
     }
