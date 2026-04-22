@@ -1,6 +1,7 @@
 #include "roki_face.h"
 #include <esp_log.h>
 #include <esp_random.h>
+#include <esp_heap_caps.h>
 #include <cstring>
 #include <algorithm>
 
@@ -80,7 +81,9 @@ const uint8_t* RokiFace::GetFaceData(Emotion e) {
         case SMIRK:     return _binary_smirk_bin_start;
         case DISGUSTED: return _binary_disgusted_bin_start;
         case SCARED:    return _binary_scared_bin_start;
-        default:        return _binary_happy_bin_start;
+        default:        return happy_clean_
+                            ? (const uint8_t*)happy_clean_
+                            : _binary_happy_bin_start;
     }
 }
 
@@ -91,6 +94,7 @@ RokiFace::~RokiFace() {
     if (blink_tmr_) { esp_timer_stop(blink_tmr_); esp_timer_delete(blink_tmr_); }
     if (render_lv_tmr_) lv_timer_delete(render_lv_tmr_);
     if (dbuf_) lv_draw_buf_destroy(dbuf_);
+    if (happy_clean_) heap_caps_free(happy_clean_);
 }
 
 void RokiFace::Create(lv_obj_t* parent, int w, int h) {
@@ -100,6 +104,59 @@ void RokiFace::Create(lv_obj_t* parent, int w, int h) {
     canvas_ = lv_canvas_create(parent);
     lv_canvas_set_draw_buf(canvas_, dbuf_);
     lv_obj_center(canvas_);
+
+    // Build a "mouthless" RAM copy of the happy sprite. This lets us draw
+    // a fully synthetic mouth (static idle smile or viseme) every frame
+    // without first having to erase the painted smile. SPIRAM-preferred.
+    happy_clean_ = (uint16_t*)heap_caps_malloc(
+        FACE_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!happy_clean_) {
+        happy_clean_ = (uint16_t*)heap_caps_malloc(
+            FACE_SIZE, MALLOC_CAP_DEFAULT);
+    }
+    if (happy_clean_) {
+        memcpy(happy_clean_, _binary_happy_bin_start, FACE_SIZE);
+        // Separate face-interior and background colors so edits don't
+        // leave a visible seam across the face circle boundary.
+        const uint16_t face_bg = happy_clean_[70 * w + 120];  // forehead
+        const uint16_t outer_bg = happy_clean_[5 * w + 5];    // corner
+        // Painted-smile geometry (measured from happy.bin): the smile's
+        // upper arc reaches y=128 at outer x, corners pop OUTSIDE face
+        // circle at y=148..174, body spans y=148..205 with the
+        // lower-lip dot at y=218..223. Eye outlines (rings) are centered
+        // at (73, 105) and (162, 105) with radius ~48, so any erase
+        // must skip pixels inside the eye discs.
+        const int FCX = 120, FCY = 120, FR2 = 102 * 102;
+        const int EX_CY = 105, EX_R2 = 52 * 52;
+        const int LEX = 73, REX = 162;
+        for (int y = 128; y <= 225; y++) {
+            uint16_t* row = happy_clean_ + y * w;
+            for (int x = 0; x < w; x++) {
+                int dy = y - FCY, dx = x - FCX;
+                bool inside_face = dy * dy + dx * dx < FR2;
+                int ey = y - EX_CY;
+                int dxl = x - LEX, dxr = x - REX;
+                bool in_eye = (ey * ey + dxl * dxl < EX_R2) ||
+                              (ey * ey + dxr * dxr < EX_R2);
+                if (inside_face) {
+                    if (!in_eye) row[x] = face_bg;
+                } else if (y <= 174) {
+                    row[x] = outer_bg;
+                }
+            }
+        }
+        // Tongue/lower-lip dot sits exactly on the face circle boundary
+        // (dy² + dx² == r²) so it misses both zones above. Kill directly.
+        for (int y = 215; y <= 225; y++) {
+            uint16_t* row = happy_clean_ + y * w;
+            for (int x = 100; x <= 140; x++) {
+                row[x] = face_bg;
+            }
+        }
+        ESP_LOGI(TAG, "happy_clean_ allocated at %p", happy_clean_);
+    } else {
+        ESP_LOGE(TAG, "happy_clean_ alloc FAILED — will render with painted smile");
+    }
 
     memcpy(dbuf_->data, GetFaceData(HAPPY), FACE_SIZE);
     lv_obj_invalidate(canvas_);
@@ -159,6 +216,17 @@ void RokiFace::SetSpeaking(bool on) {
     }
 }
 
+void RokiFace::SetViseme(int viseme_id, int amplitude) {
+    if (viseme_id < 0 || viseme_id >= VIS_COUNT) viseme_id = VIS_SIL;
+    if (amplitude < 0) amplitude = 0;
+    if (amplitude > 255) amplitude = 255;
+    viseme_.store(viseme_id, std::memory_order_relaxed);
+    viseme_amp_.store(amplitude, std::memory_order_relaxed);
+    last_viseme_ts_us_.store((uint64_t)esp_timer_get_time(),
+                             std::memory_order_relaxed);
+    dirty_ = true;
+}
+
 void RokiFace::FeedAmplitude(const int16_t* pcm, size_t n) {
     if (!speaking_ || n == 0) return;
     // RMS — более устойчив к спайкам чем peak, ближе к восприятию громкости
@@ -207,78 +275,130 @@ void RokiFace::DrawMouthOverlay(int open_amount) {
     uint16_t* buf = (uint16_t*)dbuf_->data;
 
     if (emo_ == HAPPY) {
-        // Ink-only, two-lip articulated mouth. Upper and lower lips are drawn
-        // as parabolic curves that meet at shared corners; the gap between
-        // their centres grows with audio amplitude, so the mouth opens and
-        // closes like a real talking face (jaw + lip mimicry). At rest the
-        // painted smile is shown untouched.
-        float a = (float)open_amount / (float)MOUTH_MAX_OPEN;
+        // Base sprite has the painted smile erased (see Create()), so we
+        // always draw a synthetic mouth here — either a static idle smile,
+        // an amplitude-driven fallback arc, or a viseme shape sent by the
+        // server (~250 ms TTL).
+        uint64_t now_us = (uint64_t)esp_timer_get_time();
+        uint64_t last_us = last_viseme_ts_us_.load(std::memory_order_relaxed);
+        bool viseme_fresh = (last_us != 0) && (now_us - last_us < 250000);
+        int vis = viseme_fresh ? viseme_.load(std::memory_order_relaxed) : -1;
+        int vis_amp = viseme_fresh ? viseme_amp_.load(std::memory_order_relaxed) : 0;
+        bool is_speaking = speaking_.load();
+
+        float a;
+        if (viseme_fresh) {
+            a = (vis == VIS_SIL || vis == VIS_PP) ? 0.0f : (float)vis_amp / 255.0f;
+        } else if (is_speaking) {
+            a = (float)open_amount / (float)MOUTH_MAX_OPEN;
+        } else {
+            a = 0.0f;
+        }
         if (a < 0.0f) a = 0.0f;
         if (a > 1.0f) a = 1.0f;
-
-        if (a < 0.05f) return;                // silent — painted smile untouched
 
         const uint16_t* base = (const uint16_t*)GetFaceData(HAPPY);
         const uint16_t white = base[10 * w_ + 10];
         const uint16_t black = 0x0000;
 
-        const int SMILE_Y0 = 140;
-        const int SMILE_Y1 = 216;
-
         const int FACE_CX = 120;
         const int FACE_CY = 120;
         const int FACE_INNER_R2 = 102 * 102;
 
-        auto is_dark_ink = [](uint16_t p) -> bool {
-            int r = (p >> 11) & 0x1F;
-            int g = (p >> 5)  & 0x3F;
-            int b =  p        & 0x1F;
-            // Broader threshold so anti-aliased gray edges of the painted
-            // smile are also erased (prevents the original arc from bleeding
-            // through when the animated lips are drawn on top).
-            return r < 24 && g < 48 && b < 24;
-        };
         auto inside_face = [&](int y, int x) -> bool {
             int dy = y - FACE_CY, dx = x - FACE_CX;
             return dy * dy + dx * dx < FACE_INNER_R2;
         };
 
-        // 1) Erase painted smile ink inside the face circle — arc-shaped,
-        //    outline & background stay untouched.
-        for (int y = SMILE_Y0; y <= SMILE_Y1; y++) {
-            if (y < 0 || y >= h_) continue;
-            const uint16_t* src_row = base + y * w_;
-            uint16_t* dst_row = buf + y * w_;
-            for (int x = 0; x < w_; x++) {
-                if (is_dark_ink(src_row[x]) && inside_face(y, x)) {
-                    dst_row[x] = white;
-                }
+        // Viseme shape table: rx, upper_dip (base), lower_drop (base),
+        // corner_up (smile lift), thickness.
+        struct VShape {
+            int rx;
+            float upper_dip;
+            float lower_drop;
+            float corner_up;
+            int thick;
+        };
+        static const VShape SHAPES[VIS_COUNT] = {
+            /* SIL */ {60,  0.0f,  0.0f,  4.0f, 4},
+            /* PP  */ {52,  0.0f,  0.0f,  4.0f, 4},
+            /* FF  */ {32,  1.5f,  2.0f,  1.0f, 3},
+            /* SS  */ {44,  1.0f,  3.0f,  1.0f, 3},
+            /* NN  */ {48,  1.5f,  4.0f,  1.5f, 4},
+            /* AA  */ {58,  2.0f, 16.0f,  3.0f, 4},
+            /* EE  */ {62,  1.5f,  7.0f,  2.0f, 4},
+            /* II  */ {66,  1.0f,  3.0f,  1.5f, 3},
+            /* OO  */ {30,  4.0f, 10.0f,  0.0f, 4},
+            /* UU  */ {22,  5.0f,  7.0f,  0.0f, 4},
+        };
+        // Idle smile: wide arc with strongly upturned corners, centered
+        // in the lower half of the face. corner_up=48 with thick=5 and
+        // CORNER_Y=200 puts smile corners at y=152 (halo y=149) — a
+        // safe 9-px gap below the eye bottom (y=140).
+        static const VShape IDLE = {92, 0.0f, 0.0f, 48.0f, 5};
+
+        // Visemes (speech) sit higher on the face at y=180, idle smile
+        // sits lower at y=200 to match the original painted location.
+        int corner_y;
+        VShape sh;
+        if (viseme_fresh) {
+            sh = SHAPES[vis];
+            float scale = 0.6f + 0.8f * a;
+            sh.upper_dip *= scale;
+            sh.lower_drop *= scale;
+            corner_y = 180;
+        } else if (is_speaking) {
+            sh = {60, 1.5f, 18.0f, 4.0f, 4};
+            sh.upper_dip *= a;
+            sh.lower_drop *= a;
+            corner_y = 180;
+        } else {
+            sh = IDLE;
+            corner_y = 200;
+        }
+
+        const int LIP_CX = 120;
+        const int CORNER_Y = corner_y;
+        const int MOUTH_RX = sh.rx;
+
+        // Shape-following background halo — a thin (~3 px ≈ 0.5 mm) white
+        // outline that tracks the current lip shape. Round for O, narrow
+        // for I, wide for smile.
+        const int HALO = 3;
+        for (int x = LIP_CX - MOUTH_RX - HALO;
+             x <= LIP_CX + MOUTH_RX + HALO; x++) {
+            if (x < 0 || x >= w_) continue;
+            float tt_raw = (float)(x - LIP_CX) / (float)MOUTH_RX;
+            if (tt_raw < -1.0f) tt_raw = -1.0f;
+            if (tt_raw >  1.0f) tt_raw =  1.0f;
+            float tt   = tt_raw * tt_raw;
+            float omtt = 1.0f - tt;
+
+            int corner_lift = (int)(sh.corner_up * tt + 0.5f);
+            int upper_y = CORNER_Y - corner_lift + (int)(sh.upper_dip  * omtt + 0.5f);
+            int lower_y = CORNER_Y - corner_lift + (int)(sh.lower_drop * omtt + 0.5f);
+            int y0 = upper_y - HALO;
+            int y1 = lower_y + sh.thick - 1 + HALO;
+            for (int y = y0; y <= y1; y++) {
+                if (y < 0 || y >= h_) continue;
+                if (inside_face(y, x)) buf[y * w_ + x] = white;
             }
         }
 
-        // 2) Draw two articulated lips as parabolic arcs that meet at shared
-        //    corners. Both lips lift at the corners (smile personality);
-        //    upper lip dips a touch at centre while lower lip drops strongly
-        //    with amplitude → realistic opening mouth.
-        const int MOUTH_CX    = 114;
-        const int MOUTH_RX    = 82;          // corner half-span
-        const int CORNER_Y    = 164;
-        const float CORNER_UP   = 6.0f;      // smile lift at corners
-        const float UPPER_DIP   = 2.0f * a;  // upper lip centre dip (subtle)
-        const float LOWER_DROP  = 26.0f * a; // lower lip centre drop
-        const int   THICKNESS   = 5;         // lip line thickness in px
-
-        for (int x = MOUTH_CX - MOUTH_RX; x <= MOUTH_CX + MOUTH_RX; x++) {
+        // Draw two articulated lips as parabolic arcs meeting at shared
+        // corners. For idle (upper_dip == lower_drop == 0) this degenerates
+        // to a single smile line with upturned corners.
+        for (int x = LIP_CX - MOUTH_RX; x <= LIP_CX + MOUTH_RX; x++) {
             if (x < 0 || x >= w_) continue;
-            float tt_raw = (float)(x - MOUTH_CX) / (float)MOUTH_RX;
-            float tt     = tt_raw * tt_raw;        // 0 at centre → 1 at corner
-            float omtt   = 1.0f - tt;              // 1 at centre → 0 at corner
+            float tt_raw = (float)(x - LIP_CX) / (float)MOUTH_RX;
+            float tt     = tt_raw * tt_raw;
+            float omtt   = 1.0f - tt;
 
-            int corner_lift = (int)(CORNER_UP * tt + 0.5f);
-            int upper_y = CORNER_Y - corner_lift + (int)(UPPER_DIP  * omtt + 0.5f);
-            int lower_y = CORNER_Y - corner_lift + (int)(LOWER_DROP * omtt + 0.5f);
+            int corner_lift = (int)(sh.corner_up * tt + 0.5f);
+            int upper_y = CORNER_Y - corner_lift + (int)(sh.upper_dip  * omtt + 0.5f);
+            int lower_y = CORNER_Y - corner_lift + (int)(sh.lower_drop * omtt + 0.5f);
 
-            for (int dy = 0; dy < THICKNESS; dy++) {
+            for (int dy = 0; dy < sh.thick; dy++) {
                 int uy = upper_y + dy;
                 int ly = lower_y + dy;
                 if (uy >= 0 && uy < h_ && inside_face(uy, x)) {
@@ -286,6 +406,18 @@ void RokiFace::DrawMouthOverlay(int open_amount) {
                 }
                 if (ly != uy && ly >= 0 && ly < h_ && inside_face(ly, x)) {
                     buf[ly * w_ + x] = black;
+                }
+            }
+        }
+
+        // Sibilant teeth hint — thin bright line between lips so S/SH
+        // reads as "teeth showing" rather than "mouth open".
+        if (viseme_fresh && vis == VIS_SS) {
+            int mid_y = CORNER_Y + (int)(sh.lower_drop * 0.4f);
+            for (int x = LIP_CX - MOUTH_RX + 6; x <= LIP_CX + MOUTH_RX - 6; x++) {
+                if (x < 0 || x >= w_) continue;
+                if (mid_y >= 0 && mid_y < h_ && inside_face(mid_y, x)) {
+                    buf[mid_y * w_ + x] = white;
                 }
             }
         }
@@ -399,7 +531,12 @@ void RokiFace::Render() {
         if (is_blinking && emo_ != WINK) {
             DrawBlinkOverlay();
         }
-        if (should_open) {
+        // HAPPY base is mouthless — always paint a synthetic mouth
+        // (static idle smile or speech-driven shape). For legacy yellow
+        // emojis we keep the original gate.
+        if (emo_ == HAPPY) {
+            DrawMouthOverlay(should_open ? open_amount : 0);
+        } else if (should_open) {
             DrawMouthOverlay(open_amount);
         }
         prev_open_amount_ = open_amount;
