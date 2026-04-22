@@ -27,16 +27,17 @@ static const size_t FACE_SIZE = 240 * 240 * 2;
 static const int MOUTH_CX = 120;
 static const int MOUTH_CY = 178;  // Was 185 in original, adjusted for scaling
 
-// Painted mouth region of the cartoon "happy" sprite. Used for
-// natural lip-sync: we copy rows from the base sprite's mouth and squash
-// them vertically based on voice amplitude, preserving the original art
-// style instead of drawing a synthetic ellipse on top.
-static const int HAPPY_MOUTH_CX    = 118;
-static const int HAPPY_MOUTH_CY    = 178;  // vertical center of painted mouth
-static const int HAPPY_MOUTH_Y0    = 138;  // top of painted mouth (inclusive)
-static const int HAPPY_MOUTH_Y1    = 218;  // bottom of painted mouth (inclusive)
-static const int HAPPY_MOUTH_X0    = 38;   // left edge of painted mouth
-static const int HAPPY_MOUTH_X1    = 198;  // right edge of painted mouth
+// Mouth region of the cartoon "happy" sprite (B&W wide-smile character).
+// The painted mouth is just a smile arc with a small lower-lip detail —
+// there is no open mouth with teeth/tongue — so we redraw the mouth
+// synthetically and morph it from a thin smile to an open oval based
+// on voice amplitude.
+static const int HAPPY_MOUTH_CX    = 114;
+static const int HAPPY_MOUTH_CY    = 180;
+static const int HAPPY_MOUTH_Y0    = 140;  // top of smile region
+static const int HAPPY_MOUTH_Y1    = 222;  // bottom incl. lower-lip dot
+static const int HAPPY_MOUTH_X0    = 15;
+static const int HAPPY_MOUTH_X1    = 215;
 
 // Eye positions for legacy emoji sprites (yellow circle style)
 static const int LEFT_EYE_CX = 89;
@@ -46,14 +47,15 @@ static const int RIGHT_EYE_CY = 117;
 static const int EYE_RX = 20;  // Horizontal radius of eyelid
 static const int EYE_RY = 18;  // Vertical radius of eyelid
 
-// Eye positions for the new cartoon "happy" sprite (coffee-cup character).
-// The sprite has much larger eyes placed near the top of the face.
-static const int HAPPY_LEFT_EYE_CX  = 80;
-static const int HAPPY_LEFT_EYE_CY  = 72;
-static const int HAPPY_RIGHT_EYE_CX = 170;
-static const int HAPPY_RIGHT_EYE_CY = 62;
-static const int HAPPY_EYE_RX = 26;
-static const int HAPPY_EYE_RY = 30;
+// Eye positions for the B&W cartoon "happy" sprite. Pupils sit inside
+// large round eye outlines; we cover the entire outline + interior
+// during a blink so the closed-lid line is clean.
+static const int HAPPY_LEFT_EYE_CX  = 73;
+static const int HAPPY_LEFT_EYE_CY  = 88;
+static const int HAPPY_RIGHT_EYE_CX = 162;
+static const int HAPPY_RIGHT_EYE_CY = 88;
+static const int HAPPY_EYE_RX = 48;
+static const int HAPPY_EYE_RY = 46;
 
 // Yellow color matching the emoji circle background (RGB565 native endian)
 // RGB(255, 215, 40) → R=31, G=53, B=5 → (31<<11)|(53<<5)|5 = 0xFAA5
@@ -205,95 +207,63 @@ void RokiFace::DrawMouthOverlay(int open_amount) {
     uint16_t* buf = (uint16_t*)dbuf_->data;
 
     if (emo_ == HAPPY) {
-        // Natural lip-sync for the cartoon sprite. We split the painted
-        // mouth into three bands:
-        //   * outer top lip curve    (~5 rows, dark brown)
-        //   * inner mouth interior   (teeth / dark / tongue)
-        //   * outer bottom lip curve (~5 rows, dark brown)
-        // The inner interior is vertically squashed by amplitude, and the
-        // outer lip curves are redrawn as fixed-thickness dark arcs that
-        // track the new top/bottom edges — so the contour is always visible
-        // and moves together with the mouth opening.
+        // B&W cartoon: vertically scale the painted smile rows around a
+        // pivot line so the curve itself mimics speech. At rest the sprite
+        // is shown untouched; while speaking we resample rows 146..207 with
+        // a scale factor 1.0..1.28 driven by audio amplitude. A small dark
+        // ellipse inside the smile adds a jaw/tongue feel on loud peaks.
+        float a = (float)open_amount / (float)MOUTH_MAX_OPEN;
+        if (a < 0.0f) a = 0.0f;
+        if (a > 1.0f) a = 1.0f;
+
+        // Silent — painted smile untouched.
+        if (a < 0.05f) return;
+
         const uint16_t* base = (const uint16_t*)GetFaceData(HAPPY);
-        const uint16_t face_color = base[120 * w_ + w_ / 2];
+        const uint16_t white = base[10 * w_ + 10];
 
-        const int mcy = HAPPY_MOUTH_CY;
-        const int OUTER_TOP = HAPPY_MOUTH_Y0;   // 138
-        const int OUTER_BOT = HAPPY_MOUTH_Y1;   // 218
-        const int INNER_TOP = 146;              // first row of teeth/interior
-        const int INNER_BOT = 208;              // last row of tongue/interior
-        const int inner_half_top = mcy - INNER_TOP;   // 32
-        const int inner_half_bot = INNER_BOT - mcy;   // 30
-        const int x0 = HAPPY_MOUTH_X0;
-        const int x1 = HAPPY_MOUTH_X1;
+        const int SMILE_Y0 = 146;
+        const int SMILE_Y1 = 207;
+        const int PIVOT_Y  = 177;
+        const int LOWER_DOT_Y0 = 215;   // keep painted lower-lip dot alone
+        const float scale  = 1.0f + 0.28f * a;
 
-        // Amplitude to vertical scale. Use wide dynamic range so the lip
-        // contour visibly moves: near-silence => mouth nearly closed,
-        // loudest => fully open painted mouth.
-        float amp_norm = (float)open_amount / (float)MOUTH_MAX_OPEN;
-        if (amp_norm < 0.0f) amp_norm = 0.0f;
-        if (amp_norm > 1.0f) amp_norm = 1.0f;
-        float scale = 0.06f + 0.94f * amp_norm;
+        int dst_y0 = PIVOT_Y + (int)((SMILE_Y0 - PIVOT_Y) * scale);
+        int dst_y1 = PIVOT_Y + (int)((SMILE_Y1 - PIVOT_Y) * scale);
+        if (dst_y0 < 0) dst_y0 = 0;
+        if (dst_y1 >= LOWER_DOT_Y0) dst_y1 = LOWER_DOT_Y0 - 1;
 
-        int new_ht = (int)(inner_half_top * scale + 0.5f);
-        int new_hb = (int)(inner_half_bot * scale + 0.5f);
-        if (new_ht < 2) new_ht = 2;
-        if (new_hb < 2) new_hb = 2;
+        int clear_y0 = (dst_y0 < SMILE_Y0) ? dst_y0 : SMILE_Y0;
+        int clear_y1 = (dst_y1 > SMILE_Y1) ? dst_y1 : SMILE_Y1;
+        if (clear_y1 >= LOWER_DOT_Y0) clear_y1 = LOWER_DOT_Y0 - 1;
 
-        const int out_top = mcy - new_ht;
-        const int out_bot = mcy + new_hb;
-
-        // Step 1: erase the full painted mouth region with face color.
-        for (int y = OUTER_TOP; y <= OUTER_BOT; y++) {
+        // Erase old painted smile band (full width — eyes are well above y=140).
+        for (int y = clear_y0; y <= clear_y1; y++) {
             if (y < 0 || y >= h_) continue;
             uint16_t* row = buf + y * w_;
-            for (int x = x0; x <= x1; x++) {
-                if (x < 0 || x >= w_) continue;
-                row[x] = face_color;
-            }
+            for (int x = 0; x < w_; x++) row[x] = white;
         }
 
-        // Step 2: copy inner mouth rows with vertical scaling.
-        for (int y = out_top; y <= out_bot; y++) {
+        // Redraw painted smile with vertical scale around PIVOT_Y.
+        for (int y = dst_y0; y <= dst_y1; y++) {
             if (y < 0 || y >= h_) continue;
-            int src_y;
-            if (y <= mcy) {
-                int offs = mcy - y;
-                int denom = new_ht ? new_ht : 1;
-                src_y = mcy - (offs * inner_half_top) / denom;
-            } else {
-                int offs = y - mcy;
-                int denom = new_hb ? new_hb : 1;
-                src_y = mcy + (offs * inner_half_bot) / denom;
-            }
-            if (src_y < INNER_TOP) src_y = INNER_TOP;
-            if (src_y > INNER_BOT) src_y = INNER_BOT;
+            int src_y = PIVOT_Y + (int)(((float)(y - PIVOT_Y)) / scale + 0.5f);
+            if (src_y < SMILE_Y0 - 1 || src_y > SMILE_Y1 + 1) continue;
+            if (src_y < 0 || src_y >= h_) continue;
             const uint16_t* src_row = base + src_y * w_;
-            uint16_t* dst_row       = buf  + y     * w_;
-            for (int x = x0; x <= x1; x++) {
-                if (x < 0 || x >= w_) continue;
-                dst_row[x] = src_row[x];
-            }
+            uint16_t* dst_row = buf + y * w_;
+            for (int x = 0; x < w_; x++) dst_row[x] = src_row[x];
         }
 
-        // Step 3: draw lip contour as dark curves tracking the new mouth
-        // edges. A thin ellipse segment gives the painted "smile" curve.
-        // Contour has fixed pixel thickness so it stays visible at any
-        // scale — this is what the user sees as "moving lips".
-        const uint16_t lip_color =
-            ((60 >> 3) << 11) | ((30 >> 2) << 5) | (30 >> 3);
-        const int lip_cx = (x0 + x1) / 2;
-        const int lip_rx = (x1 - x0) / 2 - 6;          // slight inset
-        const int lip_thick = 3;                        // px thickness
-        // Upper lip curve: arch slightly above out_top (eyelids-like curve)
-        DrawEllipse(buf, lip_cx, out_top - 1, lip_rx, lip_thick, lip_color);
-        // Lower lip curve
-        DrawEllipse(buf, lip_cx, out_bot + 1, lip_rx, lip_thick, lip_color);
-
-        // Corner highlights for a smile shape: two small dots at mouth corners
-        const int corner_off = lip_rx - 2;
-        DrawEllipse(buf, lip_cx - corner_off, mcy, 3, 2, lip_color);
-        DrawEllipse(buf, lip_cx + corner_off, mcy, 3, 2, lip_color);
+        // Inner dark jaw/tongue ellipse on loud peaks for extra depth.
+        if (a >= 0.18f) {
+            const uint16_t black = 0x0000;
+            const int mcx = HAPPY_MOUTH_CX;
+            const int mcy = (int)(178 + a * 6);
+            int irx = (int)(10 + 28 * a);
+            int iry = (int)(3  + 11 * a);
+            DrawEllipse(buf, mcx, mcy, irx, iry, black);
+        }
         return;
     }
 
