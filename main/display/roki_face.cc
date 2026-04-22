@@ -207,55 +207,77 @@ void RokiFace::DrawMouthOverlay(int open_amount) {
     uint16_t* buf = (uint16_t*)dbuf_->data;
 
     if (emo_ == HAPPY) {
-        // B&W cartoon: vertically scale the painted smile rows around a
-        // pivot line so the curve itself mimics speech. At rest the sprite
-        // is shown untouched; while speaking we resample rows 146..207 with
-        // a scale factor 1.0..1.28 driven by audio amplitude. A small dark
-        // ellipse inside the smile adds a jaw/tongue feel on loud peaks.
+        // B&W cartoon: ink-only mouth animation. We never paint a white
+        // rectangle — we only touch pixels that are "dark smile ink" in the
+        // base sprite and well inside the face circle (so the circle outline
+        // is preserved). At rest the sprite is shown untouched; while
+        // speaking we vertically scale the painted smile rows around PIVOT_Y
+        // with a factor 1.0..1.28 driven by audio amplitude.
         float a = (float)open_amount / (float)MOUTH_MAX_OPEN;
         if (a < 0.0f) a = 0.0f;
         if (a > 1.0f) a = 1.0f;
 
-        // Silent — painted smile untouched.
-        if (a < 0.05f) return;
+        if (a < 0.05f) return;                // silent — painted smile untouched
 
         const uint16_t* base = (const uint16_t*)GetFaceData(HAPPY);
         const uint16_t white = base[10 * w_ + 10];
 
+        // Top lip anchored — smile only stretches downward (jaw drop).
         const int SMILE_Y0 = 146;
         const int SMILE_Y1 = 207;
-        const int PIVOT_Y  = 177;
-        const int LOWER_DOT_Y0 = 215;   // keep painted lower-lip dot alone
-        const float scale  = 1.0f + 0.28f * a;
+        const int LOWER_DOT_Y0 = 215;
+        const float scale  = 1.0f + 0.30f * a;
 
-        int dst_y0 = PIVOT_Y + (int)((SMILE_Y0 - PIVOT_Y) * scale);
-        int dst_y1 = PIVOT_Y + (int)((SMILE_Y1 - PIVOT_Y) * scale);
-        if (dst_y0 < 0) dst_y0 = 0;
+        // Face body bounds (interior of the painted outline ring).
+        const int FACE_CX = 120;
+        const int FACE_CY = 120;
+        const int FACE_INNER_R2 = 102 * 102;
+
+        auto is_dark_ink = [](uint16_t p) -> bool {
+            int r = (p >> 11) & 0x1F;
+            int g = (p >> 5)  & 0x3F;
+            int b =  p        & 0x1F;
+            return r < 10 && g < 20 && b < 10;
+        };
+        auto inside_face = [&](int y, int x) -> bool {
+            int dy = y - FACE_CY, dx = x - FACE_CX;
+            return dy * dy + dx * dx < FACE_INNER_R2;
+        };
+
+        // 1) Erase the ORIGINAL painted smile ink (interior only — outline
+        //    and background stay untouched → no visible rectangle).
+        for (int y = SMILE_Y0; y <= SMILE_Y1; y++) {
+            if (y < 0 || y >= h_ || y >= LOWER_DOT_Y0) continue;
+            const uint16_t* src_row = base + y * w_;
+            uint16_t* dst_row = buf + y * w_;
+            for (int x = 0; x < w_; x++) {
+                if (is_dark_ink(src_row[x]) && inside_face(y, x)) {
+                    dst_row[x] = white;
+                }
+            }
+        }
+
+        // 2) Redraw smile ink stretched downward from SMILE_Y0 (top lip
+        //    anchored — eye area never touched).
+        int dst_y1 = SMILE_Y0 + (int)((SMILE_Y1 - SMILE_Y0) * scale);
         if (dst_y1 >= LOWER_DOT_Y0) dst_y1 = LOWER_DOT_Y0 - 1;
 
-        int clear_y0 = (dst_y0 < SMILE_Y0) ? dst_y0 : SMILE_Y0;
-        int clear_y1 = (dst_y1 > SMILE_Y1) ? dst_y1 : SMILE_Y1;
-        if (clear_y1 >= LOWER_DOT_Y0) clear_y1 = LOWER_DOT_Y0 - 1;
-
-        // Erase old painted smile band (full width — eyes are well above y=140).
-        for (int y = clear_y0; y <= clear_y1; y++) {
+        for (int y = SMILE_Y0; y <= dst_y1; y++) {
             if (y < 0 || y >= h_) continue;
-            uint16_t* row = buf + y * w_;
-            for (int x = 0; x < w_; x++) row[x] = white;
-        }
-
-        // Redraw painted smile with vertical scale around PIVOT_Y.
-        for (int y = dst_y0; y <= dst_y1; y++) {
-            if (y < 0 || y >= h_) continue;
-            int src_y = PIVOT_Y + (int)(((float)(y - PIVOT_Y)) / scale + 0.5f);
-            if (src_y < SMILE_Y0 - 1 || src_y > SMILE_Y1 + 1) continue;
-            if (src_y < 0 || src_y >= h_) continue;
+            int src_y = SMILE_Y0 +
+                        (int)(((float)(y - SMILE_Y0)) / scale + 0.5f);
+            if (src_y < SMILE_Y0 || src_y > SMILE_Y1) continue;
             const uint16_t* src_row = base + src_y * w_;
             uint16_t* dst_row = buf + y * w_;
-            for (int x = 0; x < w_; x++) dst_row[x] = src_row[x];
+            for (int x = 0; x < w_; x++) {
+                uint16_t p = src_row[x];
+                if (is_dark_ink(p) && inside_face(src_y, x) && inside_face(y, x)) {
+                    dst_row[x] = p;
+                }
+            }
         }
 
-        // Inner dark jaw/tongue ellipse on loud peaks for extra depth.
+        // 3) Optional jaw/tongue depth on loud peaks.
         if (a >= 0.18f) {
             const uint16_t black = 0x0000;
             const int mcx = HAPPY_MOUTH_CX;
