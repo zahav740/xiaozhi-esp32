@@ -1,6 +1,7 @@
 #include "roki_lcd_display.h"
 #include "lvgl_theme.h"
 #include "assets/lang_config.h"
+#include "application.h"
 #include <esp_log.h>
 #include <esp_lvgl_port.h>
 #include <font_awesome.h>
@@ -144,7 +145,72 @@ void RokiLcdDisplay::SetupUI() {
     emoji_label_ = lv_label_create(scr);
     lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
 
+    // Profile selector overlay
+    profile_overlay_ = lv_obj_create(scr);
+    lv_obj_set_size(profile_overlay_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_set_style_radius(profile_overlay_, 0, 0);
+    lv_obj_set_style_bg_color(profile_overlay_, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(profile_overlay_, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(profile_overlay_, 0, 0);
+    lv_obj_set_style_pad_all(profile_overlay_, 0, 0);
+    lv_obj_set_scrollbar_mode(profile_overlay_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_align(profile_overlay_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_flex_flow(profile_overlay_, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(profile_overlay_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(profile_overlay_, 6, 0);
+
+    auto title = lv_label_create(profile_overlay_);
+    lv_label_set_text(title, "Кто говорит?");
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_set_style_text_font(title, tf, 0);
+
+    struct ProfileBtn {
+        const char* label;
+        const char* profile_id;
+        uint32_t color;
+    };
+    static const ProfileBtn profiles[] = {
+        {"Алексей → Саня",  "alexey", 0x4A90D9},
+        {"Мирон → Роки",    "miron",  0x5CB85C},
+        {"Агата → Эльза",   "agata",  0xD9658A},
+    };
+
+    for (int i = 0; i < 3; i++) {
+        auto btn = lv_btn_create(profile_overlay_);
+        lv_obj_set_size(btn, LV_HOR_RES * 0.85, 32);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(profiles[i].color), 0);
+        lv_obj_set_style_radius(btn, 8, 0);
+
+        auto lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, profiles[i].label);
+        lv_obj_set_style_text_color(lbl, lv_color_white(), 0);
+        lv_obj_set_style_text_font(lbl, tf, 0);
+        lv_obj_center(lbl);
+
+        lv_obj_add_event_cb(btn, [](lv_event_t* e) {
+            auto id = (const char*)lv_event_get_user_data(e);
+            std::string payload = "{\"type\":\"profile\",\"id\":\"";
+            payload += id;
+            payload += "\"}";
+            Application::GetInstance().SendMcpMessage(payload);
+
+            // Hide overlay
+            auto btn_obj = (lv_obj_t*)lv_event_get_target(e);
+            auto overlay = lv_obj_get_parent(btn_obj);
+            lv_obj_add_flag(overlay, LV_OBJ_FLAG_HIDDEN);
+        }, LV_EVENT_CLICKED, (void*)profiles[i].profile_id);
+    }
+
+    lv_obj_add_flag(profile_overlay_, LV_OBJ_FLAG_HIDDEN);
+
     ESP_LOGI(TAG, "Kawaii face UI ready (animated)");
+}
+
+void RokiLcdDisplay::ShowProfileSelector() {
+    DisplayLockGuard lock(this);
+    if (profile_overlay_) {
+        lv_obj_remove_flag(profile_overlay_, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void RokiLcdDisplay::SetEmotion(const char* e) {
@@ -157,4 +223,8 @@ void RokiLcdDisplay::SetSpeaking(bool s) {
 
 void RokiLcdDisplay::FeedAudioAmplitude(const int16_t* d, size_t n) {
     if (face_) face_->FeedAmplitude(d, n);
+}
+
+void RokiLcdDisplay::SetViseme(int viseme_id, int amplitude) {
+    if (face_) face_->SetViseme(viseme_id, amplitude);
 }

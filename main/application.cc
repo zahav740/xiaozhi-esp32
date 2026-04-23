@@ -524,12 +524,14 @@ void Application::InitializeProtocol() {
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
-                Schedule([this]() {
+                Schedule([this, display]() {
                     aborted_ = false;
+                    display->SetSpeaking(true);
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
-                Schedule([this]() {
+                Schedule([this, display]() {
+                    display->SetSpeaking(false);
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
@@ -562,6 +564,13 @@ void Application::InitializeProtocol() {
                     display->SetEmotion(emotion_str.c_str());
                 });
             }
+        } else if (strcmp(type->valuestring, "viseme") == 0) {
+            auto id  = cJSON_GetObjectItem(root, "id");
+            auto amp = cJSON_GetObjectItem(root, "amp");
+            int vid = cJSON_IsNumber(id)  ? id->valueint  : 0;
+            int vam = cJSON_IsNumber(amp) ? amp->valueint : 0;
+            // Hot path — no Schedule() to keep lip-sync latency minimal.
+            display->SetViseme(vid, vam);
         } else if (strcmp(type->valuestring, "mcp") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
             if (cJSON_IsObject(payload)) {

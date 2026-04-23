@@ -13,11 +13,14 @@ public:
 
     virtual void SetupUI() override;
     virtual void SetEmotion(const char* emotion) override;
-    void SetSpeaking(bool speaking);
-    void FeedAudioAmplitude(const int16_t* data, size_t count);
+    virtual void SetSpeaking(bool speaking) override;
+    virtual void FeedAudioAmplitude(const int16_t* data, size_t count) override;
+    virtual void SetViseme(int viseme_id, int amplitude) override;
+    virtual void ShowProfileSelector() override;
 
 private:
     std::unique_ptr<RokiFace> face_;
+    lv_obj_t* profile_overlay_ = nullptr;
 };
 
 #endif

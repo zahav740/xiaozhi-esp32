@@ -1,4 +1,6 @@
 #include "audio_service.h"
+#include "board.h"
+#include "display.h"
 #include <esp_log.h>
 #include <cstring>
 
@@ -305,6 +307,10 @@ void AudioService::AudioOutputTask() {
             esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
             codec_->EnableOutput(true);
         }
+
+        // Feed audio amplitude to display for lip sync
+        Board::GetInstance().GetDisplay()->FeedAudioAmplitude(
+            task->pcm.data(), task->pcm.size());
 
         codec_->OutputData(task->pcm);
 

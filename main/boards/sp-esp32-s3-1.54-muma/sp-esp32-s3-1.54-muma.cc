@@ -75,10 +75,12 @@ private:
     TouchPoint_t tp_;
 };
 
-// Profile definitions for swipe switching
-static const char* PROFILE_IDS[] = {"alexey", "miron", "agata"};
-static const char* PROFILE_NAMES[] = {"Alexey", "Miron", "Agata"};
-static const int NUM_PROFILES = 3;
+// Shared touch state for LVGL input device
+static struct {
+    int16_t x = 0;
+    int16_t y = 0;
+    bool pressed = false;
+} s_touch_state;
 
 class Spotpear_esp32_s3_lcd_1_54 : public WifiBoard {
 private:
@@ -90,7 +92,7 @@ private:
     Cst816d* cst816d_;
     esp_io_expander_handle_t io_expander_ = NULL;
     esp_lcd_panel_handle_t panel_ = nullptr;
-    int current_profile_index_ = 0;
+    lv_indev_t* touch_indev_ = nullptr;
 
     PowerManager* power_manager_;
     PowerSaveTimer* power_save_timer_;
@@ -176,15 +178,20 @@ private:
         touchpad->UpdateTouchPoint();
         auto touch_point = touchpad->GetTouchPoint();
 
+        // Update shared state for LVGL input device
+        s_touch_state.pressed = (touch_point.num > 0);
+        if (s_touch_state.pressed) {
+            s_touch_state.x = touch_point.x;
+            s_touch_state.y = touch_point.y;
+        }
+
         // Handle swipe gestures for profile switching
         if (touch_point.gesture != Cst816d::GESTURE_NONE &&
             touch_point.gesture != last_gesture) {
-            if (touch_point.gesture == Cst816d::GESTURE_SLIDE_LEFT) {
+            if (touch_point.gesture == Cst816d::GESTURE_SLIDE_LEFT ||
+                touch_point.gesture == Cst816d::GESTURE_SLIDE_RIGHT) {
                 swipe_detected = true;
-                board.CycleProfile(1);
-            } else if (touch_point.gesture == Cst816d::GESTURE_SLIDE_RIGHT) {
-                swipe_detected = true;
-                board.CycleProfile(-1);
+                Board::GetInstance().GetDisplay()->ShowProfileSelector();
             }
         }
         last_gesture = touch_point.gesture;
@@ -208,6 +215,12 @@ private:
                 }
             }
         }
+    }
+
+    static void lvgl_touch_read_cb(lv_indev_t* indev, lv_indev_data_t* data) {
+        data->point.x = s_touch_state.x;
+        data->point.y = s_touch_state.y;
+        data->state = s_touch_state.pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
     }
 
     void InitializeCst816DTouchPad() {
@@ -311,6 +324,12 @@ public:
         InitializeButtons();
         GetBacklight()->RestoreBrightness();
 
+        // Register LVGL input device after display is initialized
+        if (cst816d_) {
+            touch_indev_ = lv_indev_create();
+            lv_indev_set_type(touch_indev_, LV_INDEV_TYPE_POINTER);
+            lv_indev_set_read_cb(touch_indev_, lvgl_touch_read_cb);
+        }
     }
 
     virtual Led* GetLed() override {
@@ -336,19 +355,6 @@ public:
 
     Cst816d* GetTouchpad() {
         return cst816d_;
-    }
-
-    void CycleProfile(int direction) {
-        current_profile_index_ = (current_profile_index_ + direction + NUM_PROFILES) % NUM_PROFILES;
-        const char* id = PROFILE_IDS[current_profile_index_];
-        const char* name = PROFILE_NAMES[current_profile_index_];
-        ESP_LOGI(TAG, "Profile switched to: %s (%s)", name, id);
-
-        // Send profile switch via MCP channel to server
-        std::string payload = "{\"type\":\"profile\",\"id\":\"";
-        payload += id;
-        payload += "\"}";
-        Application::GetInstance().SendMcpMessage(payload);
     }
 
     virtual bool GetBatteryLevel(int& level, bool& charging, bool& discharging) override {

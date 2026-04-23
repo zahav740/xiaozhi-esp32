@@ -40,7 +40,13 @@ public:
     virtual Theme* GetTheme() { return current_theme_; }
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
-    virtual void SetupUI() { 
+    virtual void SetSpeaking(bool speaking) {}
+    virtual void FeedAudioAmplitude(const int16_t* data, size_t count) {}
+    // Viseme id + loudness (0..255) — language-agnostic mouth shape hint
+    // emitted by the server per 60 ms of TTS audio.
+    virtual void SetViseme(int viseme_id, int amplitude) {}
+    virtual void ShowProfileSelector() {}
+    virtual void SetupUI() {
         setup_ui_called_ = true;
     }
 
