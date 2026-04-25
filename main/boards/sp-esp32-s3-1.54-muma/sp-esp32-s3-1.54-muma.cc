@@ -211,6 +211,11 @@ private:
                         board.EnterWifiConfigMode();
                         return;
                     }
+                    // If the server muted us (idle / stop-command), the
+                    // screen was dimmed to save battery — bring it back
+                    // before processing the tap so the user sees a face.
+                    auto* bl = board.GetBacklight();
+                    if (bl) bl->RestoreBrightness();
                     app.ToggleChatState();
                 }
             }

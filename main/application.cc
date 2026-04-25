@@ -601,6 +601,17 @@ void Application::InitializeProtocol() {
                     Schedule([this]() {
                         Reboot();
                     });
+                } else if (strcmp(command->valuestring, "display_off") == 0) {
+                    // Server says "go quiet" — dim screen, wait for tap.
+                    Schedule([]() {
+                        auto* bl = Board::GetInstance().GetBacklight();
+                        if (bl) bl->SetBrightness(0);
+                    });
+                } else if (strcmp(command->valuestring, "display_on") == 0) {
+                    Schedule([]() {
+                        auto* bl = Board::GetInstance().GetBacklight();
+                        if (bl) bl->RestoreBrightness();
+                    });
                 } else {
                     ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
                 }
