@@ -141,6 +141,11 @@ private:
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int clock_ticks_ = 0;
+    // Roki: counts contiguous seconds spent in kDeviceStateListening with no
+    // turn activity. After 5 min we drop back to Idle so the kid has to tap
+    // again — keeps the mic from staying hot indefinitely.
+    int listening_idle_ticks_ = 0;
+    static constexpr int kListeningIdleTimeoutSec = 300;  // 5 minutes
     TaskHandle_t activation_task_handle_ = nullptr;
 
 

@@ -249,10 +249,26 @@ void Application::Run() {
             clock_ticks_++;
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
-        
+
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
+            }
+
+            // Roki: 5-min idle timeout for kDeviceStateListening. After a tap
+            // we stay in AutoStop continuous-listen mode; if no turn happens
+            // for kListeningIdleTimeoutSec we drop back to Idle so the kid
+            // has to tap again (saves battery, prevents a hot mic for hours).
+            if (state_machine_.GetState() == kDeviceStateListening) {
+                listening_idle_ticks_++;
+                if (listening_idle_ticks_ >= kListeningIdleTimeoutSec) {
+                    ESP_LOGI(TAG, "Listening idle %d s — returning to Idle",
+                             listening_idle_ticks_);
+                    listening_idle_ticks_ = 0;
+                    HandleStopListeningEvent();
+                }
+            } else {
+                listening_idle_ticks_ = 0;
             }
         }
     }
@@ -751,19 +767,23 @@ void Application::HandleStartListeningEvent() {
         return;
     }
     
+    // Roki: tap should drop us into AutoStop mode so the device auto-listens
+    // again after each tts:stop. The kListeningIdleTimeoutSec watchdog falls
+    // us back to Idle if 5 min pass without any turn.
+    ListeningMode tap_mode = GetDefaultListeningMode();
     if (state == kDeviceStateIdle) {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
-            Schedule([this]() {
-                ContinueOpenAudioChannel(kListeningModeManualStop);
+            Schedule([this, tap_mode]() {
+                ContinueOpenAudioChannel(tap_mode);
             });
             return;
         }
-        SetListeningMode(kListeningModeManualStop);
+        SetListeningMode(tap_mode);
     } else if (state == kDeviceStateSpeaking) {
         AbortSpeaking(kAbortReasonNone);
-        SetListeningMode(kListeningModeManualStop);
+        SetListeningMode(tap_mode);
     }
 }
 
@@ -864,6 +884,9 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 void Application::HandleStateChangedEvent() {
     DeviceState new_state = state_machine_.GetState();
     clock_ticks_ = 0;
+    // Roki: reset the listening-idle watchdog on every state change so each
+    // entry into kDeviceStateListening gets a fresh 5-min budget.
+    listening_idle_ticks_ = 0;
 
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
