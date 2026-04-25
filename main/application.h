@@ -142,10 +142,11 @@ private:
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int clock_ticks_ = 0;
     // Roki: counts contiguous seconds spent in kDeviceStateListening with no
-    // turn activity. After 5 min we drop back to Idle so the kid has to tap
-    // again — keeps the mic from staying hot indefinitely.
+    // turn activity. After the timeout we drop back to Idle so the PowerSave
+    // chain (display dim → light sleep → deep sleep) can kick in. Keeping the
+    // mic hot during continuous-listen drains the battery very fast.
     int listening_idle_ticks_ = 0;
-    static constexpr int kListeningIdleTimeoutSec = 300;  // 5 minutes
+    static constexpr int kListeningIdleTimeoutSec = 30;  // 30 seconds
     TaskHandle_t activation_task_handle_ = nullptr;
 
 

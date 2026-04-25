@@ -24,6 +24,7 @@
 #include "power_manager.h"
 #include "power_save_timer.h"
 #include <esp_sleep.h>
+#include <esp_wifi.h>
 #include <driver/rtc_io.h>
 
 #define TAG "Spotpear_esp32_s3_lcd_1_54"
@@ -112,20 +113,40 @@ private:
         rtc_gpio_set_direction(GPIO_NUM_3, RTC_GPIO_MODE_OUTPUT_ONLY);
         rtc_gpio_set_level(GPIO_NUM_3, 1);
 
-        power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
+        // Roki battery profile (canonical xiaozhi pattern, see xmini-c3-v3 +
+        // surfer-c3 + jiuchuan-s3):
+        //   240 MHz max → 40 MHz min with light_sleep enabled by IDF DFS;
+        //   modem-sleep (WIFI_PS_MIN_MODEM) layered on top in idle.
+        // Requires CONFIG_PM_ENABLE=y + CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+        // in this board's config.json (sdkconfig_append).
+        power_save_timer_ = new PowerSaveTimer(240, 60, 300);
         power_save_timer_->OnEnterSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(true);
             GetBacklight()->SetBrightness(1);
+            esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
         });
         power_save_timer_->OnExitSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(false);
             GetBacklight()->RestoreBrightness();
+            esp_wifi_set_ps(WIFI_PS_NONE);
         });
         power_save_timer_->OnShutdownRequest([this]() {
             ESP_LOGI(TAG, "Shutting down");
             rtc_gpio_set_level(GPIO_NUM_3, 0);
             // 启用保持功能，确保睡眠期间电平不变
             rtc_gpio_hold_en(GPIO_NUM_3);
+
+            // Tap-to-wake: CST816D pulls TP_INT low on touch even when MCU is
+            // in deep sleep (chip has self-cap auto-sleep, IRQ stays armed).
+            // ext0 single-pin wakeup pattern (canonical, see jiuchuan-s3).
+            // GPIO 12 is RTC-capable and not a strapping pin → safe.
+            // (Boot button GPIO 0 intentionally NOT a wake source: it is a
+            // strapping pin — holding it on wake-up could land us in
+            // download mode.)
+            ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup(TP_PIN_NUM_TP_INT, 0));
+            ESP_ERROR_CHECK(rtc_gpio_pullup_en(TP_PIN_NUM_TP_INT));
+            ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(TP_PIN_NUM_TP_INT));
+
             esp_lcd_panel_disp_on_off(panel_, false); //关闭显示
             esp_deep_sleep_start();
         });

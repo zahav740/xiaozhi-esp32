@@ -3,7 +3,10 @@
     "builds": [
         {
             "name": "sp-esp32-s3-1.54-muma",
-            "sdkconfig_append": []
+            "sdkconfig_append": [
+                "CONFIG_PM_ENABLE=y",
+                "CONFIG_FREERTOS_USE_TICKLESS_IDLE=y"
+            ]
         }
     ]
 }
